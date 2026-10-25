@@ -12,7 +12,7 @@ public class TranscribeService extends Service {
     static final String CH_RUN = "running", CH_DONE = "done"; static final int FG_ID = 100;
     static final class Job {
         final int id; final Uri uri; final String name; final boolean cloud;
-        volatile String state = "ממתין בתור"; volatile int audioSecs = -1; volatile long startMs, endMs, etaMs, sttMs; volatile boolean done, failed, cancelled; volatile String text = "";
+        volatile String state = "ממתין בתור"; volatile int audioSecs = -1; volatile long startMs, endMs, etaMs, sttMs; volatile boolean done, failed, cancelled, inNative; volatile String text = ""; volatile Thread worker;
         Job(int id, Uri u, String n, boolean c) { this.id = id; uri = u; name = n; cloud = c; }
         /** Seconds left (estimated), or -1 if unknown. */
         long remaining() { if (done || etaMs <= 0) return -1; return Math.max(0, (etaMs - System.currentTimeMillis() + 999) / 1000); }
@@ -52,7 +52,33 @@ public class TranscribeService extends Service {
         if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(si); else c.startService(si);
         changed();
     }
-    static void cancel(int id) { for (Job j : JOBS) if (j.id == id && !j.done) { j.cancelled = true; Whisper.cancel(id); if (j.startMs == 0) { j.done = true; j.failed = true; j.state = "בוטל"; } } changed(); }
+    /**
+     * Cancel ALWAYS takes effect immediately in the UI: the job is marked done/cancelled right away, its worker thread is
+     * interrupted (unblocks the STT-lock wait, decode, model-load wait), and native whisper_full is told to abort (works even if
+     * whisper hasn't registered the job yet). If native still hasn't returned after HARD_MS the process is restarted —
+     * whisper_full cannot be killed from Java, and a stuck call would otherwise hold the STT lock forever.
+     */
+    static final long HARD_MS = 8000;
+    static void cancel(int id) {
+        for (Job j : JOBS) if (j.id == id && !j.done) {
+            j.cancelled = true; Whisper.cancel(id);
+            Thread w = j.worker; if (w != null) w.interrupt();
+            markCancelled(j);
+            if (j.inNative) hardStopLater(j, HARD_MS);
+        }
+        changed();
+    }
+    static void markCancelled(Job j) { j.failed = true; j.text = "בוטל"; j.state = "בוטל"; if (j.endMs == 0) j.endMs = System.currentTimeMillis(); j.done = true; }
+    static final Handler BG = new Handler(Looper.getMainLooper());
+    static void hardStopLater(Job j, long ms) {
+        BG.postDelayed(() -> {
+            if (!j.inNative) return; // native returned — normal path
+            android.util.Log.e("BabiTrans", "native whisper did not stop for job " + j.id + " — restarting process");
+            for (Job o : JOBS) if (!o.done) { o.failed = true; o.text = "הופסק (המנוע אופס) — שלחו שוב"; o.state = "הופסק"; o.done = true; }
+            changed();
+            BG.postDelayed(() -> { android.os.Process.killProcess(android.os.Process.myPid()); System.exit(0); }, 1500);
+        }, ms);
+    }
     static void changed() { Runnable l = listener; if (l != null) l.run(); }
     /** Finished rows are dismissed once the user has seen them in the app. */
     static void clearFinished() { for (Job j : JOBS) if (j.done) JOBS.remove(j); }
@@ -106,7 +132,8 @@ public class TranscribeService extends Service {
         if (wl.isHeld()) wl.release(); stopForeground(true); stopSelf(); changed(); }); }
 
     void run(Job j) {
-        if (j.done) { stopIfIdle(); return; }
+        if (j.done || j.cancelled) { if (!j.done) markCancelled(j); changed(); stopIfIdle(); return; }
+        j.worker = Thread.currentThread(); Thread.interrupted();
         active.add(j.id); j.startMs = System.currentTimeMillis();
         SharedPreferences prefs = getSharedPreferences("cfg", MODE_PRIVATE);
         try {
@@ -119,6 +146,7 @@ public class TranscribeService extends Service {
                 int secs = Math.max(1, pcm.length / 16000); j.audioSecs = secs;
                 String mp = MainActivity.modelFile(this).getAbsolutePath();
                 if (wctx == 0 || !mp.equals(wpath)) { j.state = "טוען מודל"; changed(); ensureCtx(mp); }
+                if (j.cancelled) throw new IOException("בוטל");
                 String key = "rtf_" + (mp.contains("q5") ? "hq" : "fast");
                 float rtf = prefs.getFloat(key, mp.contains("q5") ? 0.35f : 0.15f); // processing sec per audio sec, learned
                 int eff = secs < 28 ? secs : (int) Math.ceil(secs / 30.0) * 30; // >28s runs full 30s windows
@@ -133,7 +161,10 @@ public class TranscribeService extends Service {
                     try { if (j.cancelled) throw new IOException("בוטל");
                         if (wctx == 0 || !mp.equals(wpath)) throw new IOException("טעינת המודל נכשלה — נסו להוריד אותו שוב");
                         t1 = System.currentTimeMillis(); j.sttMs = t1; j.etaMs = t1 + est; j.state = "מתמלל"; changed();
-                        t = Whisper.transcribe(wctx, pcm, "he", 6, j.id, timeout); }
+                        j.inNative = true;
+                        // Java-side watchdog in case native abort_callback is never polled (hung inside a kernel)
+                        final int to = timeout; BG.postDelayed(() -> { if (j.inNative && !j.cancelled) { j.cancelled = true; Whisper.cancel(j.id); hardStopLater(j, HARD_MS); } }, to * 1000L + 5000);
+                        try { t = Whisper.transcribe(wctx, pcm, "he", 6, j.id, timeout); } finally { j.inNative = false; } }
                     finally { RW.readLock().unlock(); }
                 } finally { STT.unlock(); }
                 if ("\u0001CANCEL".equals(t)) throw new IOException("בוטל");
@@ -143,8 +174,10 @@ public class TranscribeService extends Service {
                 if (got > 0.01f && got < 5f) prefs.edit().putFloat(key, rtf * 0.6f + got * 0.4f).apply();
             }
             j.text = t; j.state = "הסתיים";
+            if (j.cancelled) throw new IOException("בוטל");
         } catch (Throwable e) { j.failed = true; j.text = j.cancelled ? "בוטל" : "שגיאה: " + e.getMessage(); j.state = j.cancelled ? "בוטל" : "נכשל"; }
-        j.endMs = System.currentTimeMillis(); j.done = true; active.remove(j.id);
+        if (j.endMs == 0) j.endMs = System.currentTimeMillis();
+        j.done = true; j.worker = null; active.remove(j.id); Thread.interrupted();
         if (!j.failed) deliver(j, prefs); else if (!j.cancelled) notifyText(j, "BabiTrans · תמלול נכשל", j.text);
         changed(); stopIfIdle();
     }
