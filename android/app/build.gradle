@@ -1,0 +1,15 @@
+plugins { id 'com.android.application' }
+def ksProps = new Properties()
+def ksFile = file(System.getenv('BABITRANS_KEYSTORE_PROPS') ?: '/workspace/secrets/babitrans-android/keystore.properties')
+if (ksFile.exists()) ksFile.withInputStream { ksProps.load(it) }
+android {
+    namespace 'com.erezbabayan.babitrans'
+    compileSdk 34
+    defaultConfig { applicationId 'com.erezbabayan.babitrans'; minSdk 26; targetSdk 34; versionCode 1; versionName '0.1' }
+    signingConfigs { release { if (ksFile.exists()) {
+        storeFile file(ksProps['storeFile']); storePassword ksProps['storePassword']
+        keyAlias ksProps['keyAlias']; keyPassword ksProps['keyPassword'] } } }
+    buildTypes { release { minifyEnabled false
+        signingConfig ksFile.exists() ? signingConfigs.release : signingConfigs.debug } }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+}
