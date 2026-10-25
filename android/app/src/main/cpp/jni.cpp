@@ -15,8 +15,17 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_erezbabayan_babitrans_Whisper_tran
   const char*l=e->GetStringUTFChars(lang,0);
   whisper_full_params p=whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
   p.language=l; p.translate=false; p.print_progress=false; p.print_realtime=false; p.print_timestamps=false;
-  p.no_context=true; p.single_segment=false;
-  p.n_threads=std::max(1,std::min(8,(int)std::thread::hardware_concurrency()));
+  p.no_context=true;
+  // Short-note fast path: the encoder normally always processes a 30s window (1500 frames).
+  // For a 6s note that is ~5x wasted work. audio_ctx = frames actually needed (+margin), rounded to 64.
+  // 1 encoder frame = 320 samples @16k (20ms).
+  if(n < 16000*28){ int need=(int)(n/320)+96; need=((need+63)/64)*64; p.audio_ctx=std::min(1500,std::max(256,need)); p.single_segment=true; }
+  else p.single_segment=false;
+  p.temperature=0.0f; p.temperature_inc=0.0f; // no costly fallback re-decodes
+  p.suppress_blank=true; p.suppress_nst=true;
+  int hc=(int)std::thread::hardware_concurrency();
+  // S23 (8 cores: 1 X3 + 4 A715/A710 + 3 A510). Using all 8 drags on little cores; 6 is a good balance.
+  p.n_threads=std::max(1,std::min(6,hc>0?hc:4));
   std::string out;
   if(whisper_full(c,p,d,n)==0){ int k=whisper_full_n_segments(c); for(int i=0;i<k;i++){ out+=whisper_full_get_segment_text(c,i);} }
   e->ReleaseStringUTFChars(lang,l); e->ReleaseFloatArrayElements(a,d,JNI_ABORT);

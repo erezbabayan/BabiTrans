@@ -8,9 +8,12 @@ import java.io.*; import java.net.*; import java.util.*; import org.json.JSONObj
 public class MainActivity extends Activity {
     static final int NAVY=0xFF14112B, CREAM=0xFFFFFBEA, YELLOW=0xFFFFC72C, PURPLE=0xFF2A1B7A;
     static final int PICK=1, PICK_MODEL=2;
-    static final String MODEL_URL="https://github.com/erezbabayan/BabiTrans/releases/download/model-ivrit-turbo-q5/ivrit-turbo-q5_0.bin";
-    static final long MODEL_SIZE=574041195L;
-    static long wctx=0; static final Object LOCK=new Object();
+    // fast = turbo q4_0 (default, ~3-4x faster encoder on ARM thanks to ggml q4_0 repack kernels); hq = turbo q5_0 (v0.2 model)
+    static final String FAST_URL="https://github.com/erezbabayan/BabiTrans/releases/download/model-ivrit-turbo-q4/ivrit-turbo-q4_0.bin";
+    static final long FAST_SIZE=473992235L;
+    static final String HQ_URL="https://github.com/erezbabayan/BabiTrans/releases/download/model-ivrit-turbo-q5/ivrit-turbo-q5_0.bin";
+    static final long HQ_SIZE=574041195L;
+    static long wctx=0; static String wpath=null; static final Object LOCK=new Object();
     List<Uri> pending; volatile boolean busy; Button dlBtn;
     SharedPreferences prefs; TextView status, transcript; LinearLayout root;
 
@@ -21,6 +24,8 @@ public class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         refreshModelUi();
         handle(getIntent());
+        warmUp();
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0) requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 7);
     }
     @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); setIntent(i); handle(i); }
 
@@ -54,7 +59,7 @@ public class MainActivity extends Activity {
         root.addView(btn("בחר קובץ שמע", PURPLE, CREAM, v -> {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("audio/*");
             startActivityForResult(i, PICK); }));
-        dlBtn = btn("הורד מודל תמלול (חד‑פעמי, ~550MB)", YELLOW, NAVY, v -> downloadModel()); root.addView(dlBtn);
+        dlBtn = btn("הורד מודל תמלול מהיר (חד‑פעמי, ~450MB)", YELLOW, NAVY, v -> downloadModel()); root.addView(dlBtn);
         root.addView(btn("הגדרות", NAVY, YELLOW, v -> showSettings()));
         setContentView(sv);
     }
@@ -68,12 +73,14 @@ public class MainActivity extends Activity {
         base.setText(prefs.getString("base","")); EditText tok = new EditText(this); tok.setHint("X-Matamel-Token (אופציונלי)");
         tok.setText(prefs.getString("token","")); l.addView(label("גיבוי בענן (אופציונלי): כתובת שרת matamel. ריק = תמלול במכשיר בלבד.",14,Color.GRAY)); l.addView(base); l.addView(tok);
         CheckBox cloud = new CheckBox(this); cloud.setText("העדף שרת על פני תמלול במכשיר"); cloud.setChecked(prefs.getBoolean("preferCloud", false)); l.addView(cloud);
+        CheckBox hq = new CheckBox(this); hq.setText("איכות גבוהה (איטי יותר, מודל ~550MB)"); hq.setChecked(prefs.getBoolean("hq", false)); l.addView(hq);
+        CheckBox ac = new CheckBox(this); ac.setText("העתק תמלול אוטומטית ללוח"); ac.setChecked(prefs.getBoolean("autoCopy", true)); l.addView(ac);
         Button pm = new Button(this); pm.setText("טען קובץ מודל ‎.bin‎ מהטלפון"); pm.setAllCaps(false); l.addView(pm);
         pm.setOnClickListener(v -> { Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("*/*"); startActivityForResult(i, PICK_MODEL); });
-        l.addView(label("מודל: " + (modelFile().exists() ? "מותקן (" + modelFile().length()/1048576 + "MB)" : "לא מותקן"), 13, Color.GRAY));
+        l.addView(label("מהיר: " + (ok(fastFile()) ? "מותקן" : "לא מותקן") + " · איכות גבוהה: " + (ok(hqFile()) ? "מותקן" : "לא מותקן"), 13, Color.GRAY));
         new AlertDialog.Builder(this).setTitle("הגדרות").setView(l).setPositiveButton("שמור", (dd,w) -> {
-            prefs.edit().putString("base", base.getText().toString().trim().replaceAll("/+$","")).putString("token", tok.getText().toString().trim()).putBoolean("preferCloud", cloud.isChecked()).apply();
-            refreshModelUi(); }).setNegativeButton("ביטול", null).show();
+            prefs.edit().putString("base", base.getText().toString().trim().replaceAll("/+$","")).putString("token", tok.getText().toString().trim()).putBoolean("preferCloud", cloud.isChecked()).putBoolean("hq", hq.isChecked()).putBoolean("autoCopy", ac.isChecked()).apply();
+            refreshModelUi(); warmUp(); }).setNegativeButton("ביטול", null).show();
     }
     String nameOf(Uri u) {
         try (Cursor c = getContentResolver().query(u, null, null, null, null)) {
@@ -81,13 +88,34 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
         return "audio.ogg";
     }
-    File modelFile() { return new File(getFilesDir(), "ivrit-turbo-q5_0.bin"); }
-    boolean modelReady() { File f = modelFile(); return f.exists() && f.length() > 50_000_000L; }
+    File fastFile() { return new File(getFilesDir(), "ivrit-turbo-q4_0.bin"); }
+    File hqFile() { return new File(getFilesDir(), "ivrit-turbo-q5_0.bin"); }
+    static boolean ok(File f) { return f.exists() && f.length() > 50_000_000L; }
+    boolean wantHq() { return prefs.getBoolean("hq", false); }
+    /** Preferred model if installed, else whichever is installed (v0.2 users keep working with q5 right away). */
+    File modelFile() { File want = wantHq() ? hqFile() : fastFile(), other = wantHq() ? fastFile() : hqFile(); return ok(want) || !ok(other) ? want : other; }
+    boolean modelReady() { return ok(modelFile()); }
+    boolean preferredMissing() { return !ok(wantHq() ? hqFile() : fastFile()); }
+    /** Load the model in the background as soon as the app opens, so a WhatsApp share doesn't pay the cold load. */
+    void warmUp() {
+        if (!modelReady()) return; final String path = modelFile().getAbsolutePath();
+        new Thread(() -> { synchronized (LOCK) { ensureCtx(path); } }).start();
+    }
+    static void ensureCtx(String path) {
+        if (wctx != 0 && path.equals(wpath)) return;
+        if (wctx != 0) { Whisper.free(wctx); wctx = 0; }
+        wctx = Whisper.init(path); wpath = wctx != 0 ? path : null;
+    }
     void refreshModelUi() {
         if (busy) return;
         boolean ok = modelReady();
-        dlBtn.setVisibility(ok ? View.GONE : View.VISIBLE);
-        status.setText(ok ? "מוכן — תמלול במכשיר (ivrit‑ai turbo)" : "להפעלה ראשונה: הורידו את מודל התמלול פעם אחת (~550MB, מומלץ Wi‑Fi). אחר כך הכול עובד בלי אינטרנט.");
+        boolean miss = preferredMissing();
+        dlBtn.setVisibility(miss ? View.VISIBLE : View.GONE);
+        dlBtn.setText(wantHq() ? "הורד מודל איכות גבוהה (חד‑פעמי, ~550MB)" : "הורד מודל תמלול מהיר (חד‑פעמי, ~450MB)");
+        String which = modelFile().equals(fastFile()) ? "מהיר" : "איכות גבוהה";
+        status.setText(!ok ? "להפעלה ראשונה: הורידו את מודל התמלול פעם אחת (~450MB, מומלץ Wi‑Fi). אחר כך הכול עובד בלי אינטרנט."
+            : miss ? "מוכן (מודל " + which + "). מומלץ להוריד את המודל המהיר — תמלול הודעות קצרות מהיר פי כמה."
+            : "מוכן — תמלול במכשיר (ivrit‑ai turbo · " + which + ")");
     }
     void transcribe(List<Uri> uris) {
         String base = prefs.getString("base",""), token = prefs.getString("token","");
@@ -104,9 +132,11 @@ public class MainActivity extends Activity {
                     else {
                         float[] pcm = AudioDecoder.decode(this, u);
                         int secs = pcm.length / 16000;
-                        ui("מתמלל במכשיר… (" + secs + " שניות שמע, ייתכן שייקח כמה שניות עד דקות)");
+                        ui("מתמלל במכשיר… (" + secs + " שניות שמע)");
                         synchronized (LOCK) {
-                            if (wctx == 0) { ui("טוען מודל…"); wctx = Whisper.init(modelFile().getAbsolutePath()); }
+                            String mp = modelFile().getAbsolutePath();
+                            if (wctx == 0 || !mp.equals(wpath)) ui("טוען מודל…");
+                            ensureCtx(mp);
                             if (wctx == 0) throw new IOException("טעינת המודל נכשלה — נסו להוריד אותו שוב");
                             ui("מתמלל במכשיר… (" + secs + " שניות שמע)");
                             t = Whisper.transcribe(wctx, pcm, "he").trim();
@@ -115,15 +145,34 @@ public class MainActivity extends Activity {
                     if (all.length()>0) all.append("\n\n"); all.append(t);
                 } catch (Throwable e) { all.append("שגיאה: ").append(e.getMessage()).append("\n"); }
             }
-            long dt = (System.currentTimeMillis() - t0) / 1000;
-            runOnUiThread(() -> { busy = false; status.setText("הסתיים (" + dt + " שנ׳)" + (cloud ? " · שרת" : " · במכשיר")); transcript.setText(all.toString()); });
+            double dt = (System.currentTimeMillis() - t0) / 1000.0; String text = all.toString();
+            runOnUiThread(() -> { busy = false; transcript.setText(text);
+                boolean copied = prefs.getBoolean("autoCopy", true) && !text.isEmpty() && !text.startsWith("שגיאה");
+                if (copied) ((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("transcript", text));
+                status.setText(String.format(Locale.US, "הסתיים (%.1f שנ׳)", dt) + (cloud ? " · שרת" : " · במכשיר") + (copied ? " · הועתק" : ""));
+                notifyDone(text); });
         }).start();
+    }
+    /** Like ivrit.ai's Communicator: result pops as a notification, so you can share and go back to the meeting. */
+    void notifyDone(String text) {
+        try {
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0) return;
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            Notification.Builder b;
+            if (Build.VERSION.SDK_INT >= 26) { nm.createNotificationChannel(new NotificationChannel("done", "תמלולים", NotificationManager.IMPORTANCE_DEFAULT)); b = new Notification.Builder(this, "done"); }
+            else b = new Notification.Builder(this);
+            PendingIntent pi = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class).setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_IMMUTABLE);
+            nm.notify(1, b.setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentTitle("BabiTrans · תמלול").setContentText(text)
+                .setStyle(new Notification.BigTextStyle().bigText(text)).setContentIntent(pi).setAutoCancel(true).build());
+        } catch (Throwable ignored) {}
     }
     void ui(String s) { runOnUiThread(() -> status.setText(s)); }
     void downloadModel() {
         if (busy) return; busy = true; dlBtn.setEnabled(false);
+        final boolean hq = wantHq(); final String MODEL_URL = hq ? HQ_URL : FAST_URL; final long MODEL_SIZE = hq ? HQ_SIZE : FAST_SIZE;
+        final File dest = hq ? hqFile() : fastFile();
         new Thread(() -> {
-            File part = new File(getFilesDir(), "model.part");
+            File part = new File(getFilesDir(), hq ? "model.part" : "model-fast.part");
             try {
                 long have = part.exists() ? part.length() : 0; String url = MODEL_URL;
                 HttpURLConnection c = null;
@@ -142,8 +191,8 @@ public class MainActivity extends Activity {
                         if (got - last > 4_000_000) { last = got; long g = got; ui("מוריד מודל… " + (g * 100 / MODEL_SIZE) + "% (" + g/1048576 + "/" + MODEL_SIZE/1048576 + "MB)"); } }
                 }
                 if (part.length() < MODEL_SIZE) throw new IOException("ההורדה לא הושלמה — לחצו שוב להמשך");
-                if (!part.renameTo(modelFile())) throw new IOException("שמירה נכשלה");
-                runOnUiThread(() -> { busy = false; dlBtn.setEnabled(true); refreshModelUi(); Toast.makeText(this, "המודל הותקן", Toast.LENGTH_SHORT).show();
+                if (!part.renameTo(dest)) throw new IOException("שמירה נכשלה");
+                runOnUiThread(() -> { busy = false; dlBtn.setEnabled(true); refreshModelUi(); Toast.makeText(this, "המודל הותקן", Toast.LENGTH_SHORT).show(); warmUp();
                     if (pending != null) { List<Uri> p = pending; pending = null; transcribe(p); } });
             } catch (Exception e) {
                 runOnUiThread(() -> { busy = false; dlBtn.setEnabled(true); status.setText("הורדה נכשלה: " + e.getMessage() + " — לחצו שוב להמשך"); });
@@ -156,8 +205,10 @@ public class MainActivity extends Activity {
             File tmp = new File(getFilesDir(), "model.import");
             try (InputStream in = getContentResolver().openInputStream(u); OutputStream o = new FileOutputStream(tmp)) {
                 byte[] b = new byte[1 << 16]; int n; while ((n = in.read(b)) > 0) o.write(b, 0, n);
-                synchronized (LOCK) { if (wctx != 0) { Whisper.free(wctx); wctx = 0; } modelFile().delete(); tmp.renameTo(modelFile()); }
-                runOnUiThread(() -> { busy = false; refreshModelUi(); });
+                File dst = tmp.length() < 520_000_000L ? fastFile() : hqFile(); // q4 ~452MB, q5 ~547MB
+                synchronized (LOCK) { if (wctx != 0) { Whisper.free(wctx); wctx = 0; wpath = null; } dst.delete(); tmp.renameTo(dst); }
+                prefs.edit().putBoolean("hq", dst.equals(hqFile())).apply();
+                runOnUiThread(() -> { busy = false; refreshModelUi(); warmUp(); });
             } catch (Exception e) { runOnUiThread(() -> { busy = false; status.setText("טעינה נכשלה: " + e.getMessage()); }); }
         }).start();
     }
