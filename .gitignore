@@ -10,3 +10,4 @@ server/uploads/
 *.ct2/
 models/
 .cache/
+android/app/.cxx/
