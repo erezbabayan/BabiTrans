@@ -27,8 +27,8 @@ public class MainActivity extends Activity {
         warmUp();
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0) requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 7);
     }
-    @Override protected void onResume() { super.onResume(); TranscribeService.listener = () -> runOnUiThread(this::renderJobs); renderJobs(); }
-    @Override protected void onPause() { super.onPause(); TranscribeService.listener = null; TranscribeService.clearFinished(); }
+    @Override protected void onResume() { super.onResume(); DownloadService.listener = () -> runOnUiThread(this::renderDl); renderDl(); TranscribeService.listener = () -> runOnUiThread(this::renderJobs); renderJobs(); }
+    @Override protected void onPause() { super.onPause(); DownloadService.listener = null; TranscribeService.listener = null; TranscribeService.clearFinished(); }
     @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); setIntent(i); handle(i); }
 
     void handle(Intent i) {
@@ -217,38 +217,16 @@ public class MainActivity extends Activity {
     }
     void ui(String s) { runOnUiThread(() -> status.setText(s)); }
     void downloadModel() {
-        if (busy) return; busy = true; dlBtn.setEnabled(false);
-        final boolean hq = wantHq(); final String MODEL_URL = hq ? HQ_URL : FAST_URL; final long MODEL_SIZE = hq ? HQ_SIZE : FAST_SIZE;
-        final File dest = hq ? hqFile() : fastFile();
-        new Thread(() -> {
-            File part = new File(getFilesDir(), hq ? "model.part" : "model-fast.part");
-            try {
-                long have = part.exists() ? part.length() : 0; String url = MODEL_URL;
-                HttpURLConnection c = null;
-                for (int hop = 0; hop < 6; hop++) {
-                    c = (HttpURLConnection) new URL(url).openConnection(); c.setInstanceFollowRedirects(false);
-                    c.setConnectTimeout(20000); c.setReadTimeout(60000);
-                    if (have > 0) c.setRequestProperty("Range", "bytes=" + have + "-");
-                    int code = c.getResponseCode();
-                    if (code / 100 == 3) { url = new URL(new URL(url), c.getHeaderField("Location")).toString(); c.disconnect(); continue; }
-                    if (code == 200) have = 0; else if (code != 206) throw new IOException("HTTP " + code);
-                    break;
-                }
-                try (InputStream in = c.getInputStream(); OutputStream o = new FileOutputStream(part, have > 0)) {
-                    byte[] b = new byte[1 << 16]; int n; long got = have, last = 0;
-                    while ((n = in.read(b)) > 0) { o.write(b, 0, n); got += n;
-                        if (got - last > 4_000_000) { last = got; long g = got; ui("מוריד מודל… " + (g * 100 / MODEL_SIZE) + "% (" + g/1048576 + "/" + MODEL_SIZE/1048576 + "MB)"); } }
-                }
-                if (part.length() < MODEL_SIZE) throw new IOException("ההורדה לא הושלמה — לחצו שוב להמשך");
-                ui("מאמת חתימת SHA‑256 של המודל…");
-                if (!sha256(part).equals(hq ? HQ_SHA : FAST_SHA)) { part.delete(); throw new IOException("קובץ המודל לא תקין (SHA‑256) — נמחק, לחצו שוב"); }
-                if (!part.renameTo(dest)) throw new IOException("שמירה נכשלה");
-                runOnUiThread(() -> { busy = false; dlBtn.setEnabled(true); refreshModelUi(); Toast.makeText(this, "המודל הותקן", Toast.LENGTH_SHORT).show(); warmUp();
-                    if (pending != null) { List<Uri> p = pending; pending = null; transcribe(p); } });
-            } catch (Exception e) {
-                runOnUiThread(() -> { busy = false; dlBtn.setEnabled(true); status.setText("הורדה נכשלה: " + e.getMessage() + " — לחצו שוב להמשך"); });
-            }
-        }).start();
+        if (DownloadService.running) { DownloadService.cancel(this); return; } // button doubles as cancel while downloading
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0)
+            Toast.makeText(this, "אפשרו התראות כדי לראות את התקדמות ההורדה", Toast.LENGTH_LONG).show();
+        DownloadService.start(this, wantHq()); status.setText("מתחבר לשרת…"); renderDl();
+        Toast.makeText(this, "ההורדה ממשיכה ברקע — אפשר לצאת מהאפליקציה", Toast.LENGTH_SHORT).show();
+    }
+    void renderDl() {
+        if (DownloadService.running) { busy = true; dlBtn.setEnabled(true); dlBtn.setText("ביטול הורדה"); status.setText(DownloadService.msg); return; }
+        if (busy && DownloadService.finished) { busy = false; DownloadService.finished = false; refreshModelUi(); status.setText(DownloadService.msg);
+            if (DownloadService.ok) { warmUp(); if (pending != null) { List<Uri> p = pending; pending = null; transcribe(p); } } }
     }
     void importModel(Uri u) {
         busy = true; status.setText("מעתיק מודל…");
