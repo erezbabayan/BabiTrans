@@ -15,20 +15,20 @@ public class MainActivity extends Activity {
     static final String HQ_SHA="6c1da92e8e41dd64b8cc402eee7eb7a433d2152567e1a4d9cf181fefcc67a572";
     static final String HQ_URL="https://github.com/erezbabayan/BabiTrans/releases/download/model-ivrit-turbo-q5/ivrit-turbo-q5_0.bin";
     static final long HQ_SIZE=574041195L;
-    static long wctx=0; static String wpath=null; static final Object LOCK=new Object();
     List<Uri> pending; volatile boolean busy; Button dlBtn;
-    SharedPreferences prefs; TextView status, transcript; LinearLayout root;
+    SharedPreferences prefs; TextView status, transcript; LinearLayout root, jobsBox; int shownJob = -1;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         prefs = getSharedPreferences("cfg", MODE_PRIVATE);
         buildUi();
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         refreshModelUi();
         handle(getIntent());
         warmUp();
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0) requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 7);
     }
+    @Override protected void onResume() { super.onResume(); TranscribeService.listener = () -> runOnUiThread(this::renderJobs); renderJobs(); }
+    @Override protected void onPause() { super.onPause(); TranscribeService.listener = null; TranscribeService.clearFinished(); }
     @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); setIntent(i); handle(i); }
 
     void handle(Intent i) {
@@ -49,11 +49,13 @@ public class MainActivity extends Activity {
         root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(48,64,48,48);
         root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL); sv.addView(root);
         ImageView logo = new ImageView(this); logo.setImageResource(R.drawable.logo_babitrans); logo.setAdjustViewBounds(true);
-        GradientDrawable ld = new GradientDrawable(); ld.setColor(0xFFFFF9EB); ld.setCornerRadius(36); logo.setBackground(ld);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2); lp.bottomMargin = 16; logo.setLayoutParams(lp); root.addView(logo);
+        GradientDrawable ld = new GradientDrawable(); ld.setColor(0xFFFFF9EB); ld.setCornerRadius(24); logo.setBackground(ld); logo.setPadding(8,8,8,8);
+        int lsz = (int) (72 * getResources().getDisplayMetrics().density); // compact header (was full-width)
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(lsz, lsz); lp.bottomMargin = 16; lp.gravity = Gravity.CENTER_HORIZONTAL; logo.setLayoutParams(lp); root.addView(logo);
         TextView title = label("מתמלל הודעות קוליות", 22, YELLOW); title.setTypeface(Typeface.DEFAULT_BOLD); root.addView(title);
         root.addView(label("שתפו הודעה קולית מוואטסאפ ל‑BabiTrans, או בחרו קובץ. התמלול רץ על המכשיר — בלי שרת ובלי אינטרנט.", 15, CREAM));
         status = label("", 15, YELLOW); root.addView(status);
+        jobsBox = new LinearLayout(this); jobsBox.setOrientation(LinearLayout.VERTICAL); root.addView(jobsBox);
         LinearLayout card = new LinearLayout(this); card.setOrientation(LinearLayout.VERTICAL); card.setPadding(40,40,40,40);
         GradientDrawable cd = new GradientDrawable(); cd.setColor(CREAM); cd.setCornerRadius(36); card.setBackground(cd);
         LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1,-2); cp.topMargin = 32; card.setLayoutParams(cp);
@@ -125,7 +127,7 @@ public class MainActivity extends Activity {
     void confirmWipe() {
         new AlertDialog.Builder(this).setTitle("מחיקת נתונים").setMessage("יימחקו מהטלפון: הגדרות, כתובת שרת וטוקן, ומודלי התמלול שהורדו (יהיה צריך להוריד שוב). תמלילים לא נשמרים באפליקציה ממילא. להמשיך?")
             .setPositiveButton("מחק", (x, w) -> new Thread(() -> {
-                synchronized (LOCK) { if (wctx != 0) { Whisper.free(wctx); wctx = 0; wpath = null; } }
+                TranscribeService.freeCtx();
                 File[] fs = getFilesDir().listFiles(); if (fs != null) for (File f : fs) f.delete();
                 File[] cs = getCacheDir().listFiles(); if (cs != null) for (File f : cs) f.delete();
                 prefs.edit().clear().commit();
@@ -147,16 +149,18 @@ public class MainActivity extends Activity {
         "• אחרי ההתקנה אפשר לבטל שוב את \"התקנה ממקורות לא ידועים\" לדפדפן.\n\n" +
         "• עדכון: פתחו את קישור releases/latest והתקינו מעל הגרסה הקיימת — ההגדרות והמודל נשמרים.\n\n" +
         "• מודל התמלול מאומת ב‑SHA‑256 אחרי ההורדה; קובץ פגום נמחק.\n\n" +
-        "• הרשאות: אינטרנט והתראות בלבד. אין מיקרופון, אנשי קשר, מיקום או אחסון.\n\n" +
+        "• הרשאות: אינטרנט, התראות, ושירות רקע (כדי שהתמלול ימשיך כשעוברים לאפליקציה אחרת). אין מיקרופון, אנשי קשר, מיקום או אחסון.\n\n" +
         "• תעבורה: HTTPS בלבד, למעט השרת הביתי ברשת המקומית (10.0.0.8) אם הגדרת אותו.";
-    String nameOf(Uri u) {
-        try (Cursor c = getContentResolver().query(u, null, null, null, null)) {
+    static String nameOf(Context ctx, Uri u) {
+        try (Cursor c = ctx.getContentResolver().query(u, null, null, null, null)) {
             if (c != null && c.moveToFirst()) { int i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME); if (i >= 0) return c.getString(i); }
         } catch (Exception ignored) {}
         return "audio.ogg";
     }
     File fastFile() { return new File(getFilesDir(), "ivrit-turbo-q4_0.bin"); }
     File hqFile() { return new File(getFilesDir(), "ivrit-turbo-q5_0.bin"); }
+    static File modelFile(Context c) { File f = new File(c.getFilesDir(), "ivrit-turbo-q4_0.bin"), q = new File(c.getFilesDir(), "ivrit-turbo-q5_0.bin");
+        boolean hq = c.getSharedPreferences("cfg", MODE_PRIVATE).getBoolean("hq", false); File want = hq ? q : f, other = hq ? f : q; return ok(want) || !ok(other) ? want : other; }
     static boolean ok(File f) { return f.exists() && f.length() > 50_000_000L; }
     boolean wantHq() { return prefs.getBoolean("hq", false); }
     /** Preferred model if installed, else whichever is installed (v0.2 users keep working with q5 right away). */
@@ -166,12 +170,7 @@ public class MainActivity extends Activity {
     /** Load the model in the background as soon as the app opens, so a WhatsApp share doesn't pay the cold load. */
     void warmUp() {
         if (!modelReady()) return; final String path = modelFile().getAbsolutePath();
-        new Thread(() -> { synchronized (LOCK) { ensureCtx(path); } }).start();
-    }
-    static void ensureCtx(String path) {
-        if (wctx != 0 && path.equals(wpath)) return;
-        if (wctx != 0) { Whisper.free(wctx); wctx = 0; }
-        wctx = Whisper.init(path); wpath = wctx != 0 ? path : null;
+        new Thread(() -> TranscribeService.ensureCtx(path)).start();
     }
     void refreshModelUi() {
         if (busy) return;
@@ -185,53 +184,36 @@ public class MainActivity extends Activity {
             : "מוכן — תמלול במכשיר (ivrit‑ai turbo · " + which + ")");
     }
     void transcribe(List<Uri> uris) {
-        String base = prefs.getString("base",""), token = prefs.getString("token","");
+        String base = prefs.getString("base","");
         boolean cloud = !base.isEmpty() && (prefs.getBoolean("preferCloud", false) || !modelReady());
         if (!cloud && !modelReady()) { pending = uris; status.setText("כדי לתמלל צריך קודם להוריד את המודל (פעם אחת). מתחיל הורדה…"); downloadModel(); return; }
-        if (busy) { Toast.makeText(this, "תמלול אחר עדיין רץ", Toast.LENGTH_SHORT).show(); return; }
-        busy = true; transcript.setText(""); status.setText(cloud ? "שולח לשרת…" : "מפענח שמע…");
-        new Thread(() -> {
-            StringBuilder all = new StringBuilder(); long t0 = System.currentTimeMillis();
-            for (Uri u : uris) {
-                try {
-                    String t;
-                    if (cloud) t = post(base + "/transcribe", token, u);
-                    else {
-                        float[] pcm = AudioDecoder.decode(this, u);
-                        int secs = pcm.length / 16000;
-                        ui("מתמלל במכשיר… (" + secs + " שניות שמע)");
-                        synchronized (LOCK) {
-                            String mp = modelFile().getAbsolutePath();
-                            if (wctx == 0 || !mp.equals(wpath)) ui("טוען מודל…");
-                            ensureCtx(mp);
-                            if (wctx == 0) throw new IOException("טעינת המודל נכשלה — נסו להוריד אותו שוב");
-                            ui("מתמלל במכשיר… (" + secs + " שניות שמע)");
-                            t = Whisper.transcribe(wctx, pcm, "he").trim();
-                        }
-                    }
-                    if (all.length()>0) all.append("\n\n"); all.append(t);
-                } catch (Throwable e) { all.append("שגיאה: ").append(e.getMessage()).append("\n"); }
-            }
-            double dt = (System.currentTimeMillis() - t0) / 1000.0; String text = all.toString();
-            runOnUiThread(() -> { busy = false; transcript.setText(text);
-                boolean copied = prefs.getBoolean("autoCopy", true) && !text.isEmpty() && !text.startsWith("שגיאה");
-                if (copied) ((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("transcript", text));
-                status.setText(String.format(Locale.US, "הסתיים (%.1f שנ׳)", dt) + (cloud ? " · שרת" : " · במכשיר") + (copied ? " · הועתק" : ""));
-                notifyDone(text); });
-        }).start();
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0)
+            Toast.makeText(this, "אפשרו התראות כדי לקבל את התמלול כשאתם באפליקציה אחרת", Toast.LENGTH_LONG).show();
+        TranscribeService.enqueue(this, uris, cloud); // runs in a foreground service — you can leave the app
+        Toast.makeText(this, uris.size() > 1 ? "נוספו " + uris.size() + " תמלולים — אפשר לעבור לאפליקציה אחרת" : "התמלול רץ ברקע — אפשר לעבור לאפליקציה אחרת", Toast.LENGTH_SHORT).show();
     }
-    /** Like ivrit.ai's Communicator: result pops as a notification, so you can share and go back to the meeting. */
-    void notifyDone(String text) {
-        try {
-            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0) return;
-            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-            Notification.Builder b;
-            if (Build.VERSION.SDK_INT >= 26) { nm.createNotificationChannel(new NotificationChannel("done", "תמלולים", NotificationManager.IMPORTANCE_DEFAULT)); b = new Notification.Builder(this, "done"); }
-            else b = new Notification.Builder(this);
-            PendingIntent pi = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class).setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_IMMUTABLE);
-            nm.notify(1, b.setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentTitle("BabiTrans · תמלול").setContentText(text)
-                .setStyle(new Notification.BigTextStyle().bigText(text)).setContentIntent(pi).setAutoCancel(true).build());
-        } catch (Throwable ignored) {}
+    static String fmt(long s) { return s >= 60 ? String.format(Locale.US, "%d:%02d", s / 60, s % 60) : s + " שנ׳"; }
+    static String jobLine(TranscribeService.Job j) {
+        String a = j.audioSecs > 0 ? " · " + fmt(j.audioSecs) + " שמע" : "";
+        if (j.done) return (j.failed ? "✗ " : "✓ ") + j.name + " — " + j.state + " (" + fmt(j.elapsed()) + ")";
+        if (j.startMs == 0) return "⏳ " + j.name + " — ממתין בתור";
+        long r = j.remaining();
+        String eta = "מתמלל".equals(j.state) ? (r > 0 ? " · נותרו ~" + fmt(r) : " · עוד רגע…") : "";
+        return "● " + j.name + " — " + j.state + a + " · עבר " + fmt(j.elapsed()) + eta;
+    }
+    void renderJobs() {
+        jobsBox.removeAllViews(); boolean running = false;
+        for (TranscribeService.Job j : TranscribeService.JOBS) {
+            LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); row.setGravity(Gravity.CENTER_VERTICAL); row.setPadding(0,8,0,8);
+            TextView t = label(jobLine(j), 14, j.done ? (j.failed ? 0xFFFF8A80 : CREAM) : YELLOW);
+            row.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+            if (!j.done) { running = true; TextView x = label("  ביטול", 14, 0xFFFF8A80); x.setOnClickListener(v -> TranscribeService.cancel(j.id)); row.addView(x); }
+            else if (!j.failed) { row.setOnClickListener(v -> { shownJob = j.id; transcript.setText(j.text); }); }
+            jobsBox.addView(row);
+            if (j.done && !j.failed && j.id > shownJob) { shownJob = j.id; transcript.setText(j.text); }
+        }
+        if (!running && !busy) refreshModelUi();
+        else if (running) status.setText("ממשיך גם כשהאפליקציה סגורה — התוצאה תגיע בהתראה" + (prefs.getBoolean("autoCopy", true) ? " ותועתק ללוח" : ""));
     }
     void ui(String s) { runOnUiThread(() -> status.setText(s)); }
     void downloadModel() {
@@ -275,21 +257,21 @@ public class MainActivity extends Activity {
             try (InputStream in = getContentResolver().openInputStream(u); OutputStream o = new FileOutputStream(tmp)) {
                 byte[] b = new byte[1 << 16]; int n; while ((n = in.read(b)) > 0) o.write(b, 0, n);
                 File dst = tmp.length() < 520_000_000L ? fastFile() : hqFile(); // q4 ~452MB, q5 ~547MB
-                synchronized (LOCK) { if (wctx != 0) { Whisper.free(wctx); wctx = 0; wpath = null; } dst.delete(); tmp.renameTo(dst); }
+                TranscribeService.freeCtx(); dst.delete(); tmp.renameTo(dst);
                 prefs.edit().putBoolean("hq", dst.equals(hqFile())).apply();
                 runOnUiThread(() -> { busy = false; refreshModelUi(); warmUp(); });
             } catch (Exception e) { runOnUiThread(() -> { busy = false; status.setText("טעינה נכשלה: " + e.getMessage()); }); }
         }).start();
     }
-    String post(String url, String token, Uri u) throws Exception {
-        String bnd = "----bt" + System.currentTimeMillis(); String mime = getContentResolver().getType(u);
+    static String post(Context ctx, String url, String token, Uri u) throws Exception {
+        String bnd = "----bt" + System.currentTimeMillis(); String mime = ctx.getContentResolver().getType(u);
         if (mime == null) mime = "application/octet-stream";
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setDoOutput(true); c.setConnectTimeout(20000); c.setReadTimeout(600000); c.setChunkedStreamingMode(0);
         c.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + bnd);
         if (!token.isEmpty()) c.setRequestProperty("X-Matamel-Token", token);
-        try (OutputStream o = c.getOutputStream(); InputStream in = getContentResolver().openInputStream(u)) {
-            o.write(("--"+bnd+"\r\nContent-Disposition: form-data; name=\"audio\"; filename=\""+nameOf(u).replace("\"","")+"\"\r\nContent-Type: "+mime+"\r\n\r\n").getBytes("UTF-8"));
+        try (OutputStream o = c.getOutputStream(); InputStream in = ctx.getContentResolver().openInputStream(u)) {
+            o.write(("--"+bnd+"\r\nContent-Disposition: form-data; name=\"audio\"; filename=\""+nameOf(ctx, u).replace("\"","")+"\"\r\nContent-Type: "+mime+"\r\n\r\n").getBytes("UTF-8"));
             byte[] buf = new byte[65536]; int n; while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
             o.write(("\r\n--"+bnd+"--\r\n").getBytes("UTF-8"));
         }

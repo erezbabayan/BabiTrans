@@ -2,14 +2,26 @@
 #include <string>
 #include <thread>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <map>
+// Per-job cancel/watchdog: whisper polls abort_callback between graph steps, so a stuck or
+// too-slow job is stopped (cancel button, or deadline) instead of spinning forever.
+struct Job { std::atomic<bool> cancel{false}; long long deadline_ms=0; };
+static std::mutex g_mu; static std::map<int,Job*> g_jobs;
+static long long now_ms(){ return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+static bool abort_cb(void*u){ Job*j=(Job*)u; return j->cancel.load() || (j->deadline_ms>0 && now_ms()>j->deadline_ms); }
+extern "C" JNIEXPORT void JNICALL Java_com_erezbabayan_babitrans_Whisper_cancel(JNIEnv*,jclass,jint id){
+  std::lock_guard<std::mutex> g(g_mu); auto it=g_jobs.find(id); if(it!=g_jobs.end()) it->second->cancel=true; }
 #include "whisper.h"
 extern "C" JNIEXPORT jlong JNICALL Java_com_erezbabayan_babitrans_Whisper_init(JNIEnv*e,jclass,jstring p){
   const char*s=e->GetStringUTFChars(p,0);
   whisper_context_params cp=whisper_context_default_params(); cp.use_gpu=false;
-  whisper_context*c=whisper_init_from_file_with_params(s,cp);
+  whisper_context*c=whisper_init_from_file_with_params_no_state(s,cp);
   e->ReleaseStringUTFChars(p,s); return (jlong)c;}
 extern "C" JNIEXPORT void JNICALL Java_com_erezbabayan_babitrans_Whisper_free(JNIEnv*,jclass,jlong c){ if(c) whisper_free((whisper_context*)c);}
-extern "C" JNIEXPORT jstring JNICALL Java_com_erezbabayan_babitrans_Whisper_transcribe(JNIEnv*e,jclass,jlong h,jfloatArray a,jstring lang){
+extern "C" JNIEXPORT jstring JNICALL Java_com_erezbabayan_babitrans_Whisper_transcribe(JNIEnv*e,jclass,jlong h,jfloatArray a,jstring lang,jint nth,jint jobId,jint timeoutSec){
   whisper_context*c=(whisper_context*)h; if(!c) return e->NewStringUTF("");
   jsize n=e->GetArrayLength(a); jfloat*d=e->GetFloatArrayElements(a,0);
   const char*l=e->GetStringUTFChars(lang,0);
@@ -25,9 +37,20 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_erezbabayan_babitrans_Whisper_tran
   p.suppress_blank=true; p.suppress_nst=true;
   int hc=(int)std::thread::hardware_concurrency();
   // S23 (8 cores: 1 X3 + 4 A715/A710 + 3 A510). Using all 8 drags on little cores; 6 is a good balance.
-  p.n_threads=std::max(1,std::min(6,hc>0?hc:4));
-  std::string out;
-  if(whisper_full(c,p,d,n)==0){ int k=whisper_full_n_segments(c); for(int i=0;i<k;i++){ out+=whisper_full_get_segment_text(c,i);} }
+  p.n_threads=nth>0?(int)nth:std::max(1,std::min(6,hc>0?hc:4));
+  Job job; if(timeoutSec>0) job.deadline_ms=now_ms()+(long long)timeoutSec*1000;
+  { std::lock_guard<std::mutex> g(g_mu); g_jobs[jobId]=&job; }
+  p.abort_callback=abort_cb; p.abort_callback_user_data=&job;
+  p.encoder_begin_callback=[](whisper_context*,whisper_state*,void*u){ return !abort_cb(u); }; p.encoder_begin_callback_user_data=&job;
+  std::string out; bool aborted=false;
+  // Each job gets its own whisper_state over the shared read-only model weights, so several
+  // transcriptions can run concurrently without loading the ~450MB model twice.
+  whisper_state*st=whisper_init_state(c);
+  if(st){ if(whisper_full_with_state(c,st,p,d,n)==0){ int k=whisper_full_n_segments_from_state(st); for(int i=0;i<k;i++){ out+=whisper_full_get_segment_text_from_state(st,i);} }
+    whisper_free_state(st); }
+  aborted=abort_cb(&job); bool cancelled=job.cancel.load();
+  { std::lock_guard<std::mutex> g(g_mu); g_jobs.erase(jobId); }
+  if(aborted){ out = cancelled ? "\x01" "CANCEL" : "\x01" "TIMEOUT"; }
   e->ReleaseStringUTFChars(lang,l); e->ReleaseFloatArrayElements(a,d,JNI_ABORT);
   // trim leading space
   size_t s=out.find_first_not_of(' '); if(s!=std::string::npos) out=out.substr(s);

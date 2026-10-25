@@ -5,7 +5,7 @@ if (ksFile.exists()) ksFile.withInputStream { ksProps.load(it) }
 android {
     namespace 'com.erezbabayan.babitrans'
     compileSdk 34
-    defaultConfig { applicationId 'com.erezbabayan.babitrans'; minSdk 26; targetSdk 34; versionCode 5; versionName '0.3.2'
+    defaultConfig { applicationId 'com.erezbabayan.babitrans'; minSdk 26; targetSdk 34; versionCode 6; versionName '0.3.3'
         ndk { abiFilters(*((project.findProperty('abis') ?: 'arm64-v8a').toString().split(','))) }
         externalNativeBuild { cmake { arguments '-DANDROID_STL=c++_static', "-DWHISPER_SRC=${System.getenv('WHISPER_SRC') ?: ''}" } } }
     ndkVersion '26.3.11579264'
