@@ -11,3 +11,7 @@ server/uploads/
 models/
 .cache/
 android/app/.cxx/
+*.jks
+*.keystore
+keystore.properties
+local.properties

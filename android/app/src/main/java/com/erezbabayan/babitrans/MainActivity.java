@@ -11,6 +11,8 @@ public class MainActivity extends Activity {
     // fast = turbo q4_0 (default, ~3-4x faster encoder on ARM thanks to ggml q4_0 repack kernels); hq = turbo q5_0 (v0.2 model)
     static final String FAST_URL="https://github.com/erezbabayan/BabiTrans/releases/download/model-ivrit-turbo-q4/ivrit-turbo-q4_0.bin";
     static final long FAST_SIZE=473992235L;
+    static final String FAST_SHA="e049b13550e5d67d44de3e30354710eaebd67569699d6b91ffe3103dbdc77975";
+    static final String HQ_SHA="6c1da92e8e41dd64b8cc402eee7eb7a433d2152567e1a4d9cf181fefcc67a572";
     static final String HQ_URL="https://github.com/erezbabayan/BabiTrans/releases/download/model-ivrit-turbo-q5/ivrit-turbo-q5_0.bin";
     static final long HQ_SIZE=574041195L;
     static long wctx=0; static String wpath=null; static final Object LOCK=new Object();
@@ -84,11 +86,69 @@ public class MainActivity extends Activity {
         ImageView ai = new ImageView(this); ai.setImageResource(R.drawable.logo_bubble); about.addView(ai, new LinearLayout.LayoutParams(120,120));
         String ver = ""; try { ver = getPackageManager().getPackageInfo(getPackageName(),0).versionName; } catch (Exception ignored) {}
         TextView at = label("  BabiTrans v" + ver + " · תמלול עברי במכשיר", 14, Color.GRAY); about.addView(at); l.addView(about);
+        LinearLayout links = new LinearLayout(this); links.setOrientation(LinearLayout.HORIZONTAL); links.setPadding(0,16,0,0);
+        links.addView(link("פרטיות", () -> info("פרטיות", PRIVACY_HE, PRIVACY_URL)));
+        links.addView(link("אבטחה ועדכונים", () -> info("אבטחה ועדכונים", SECURITY_HE, SECURITY_URL)));
+        links.addView(link("תנאי שימוש", () -> openUrl(TERMS_URL)));
+        l.addView(links);
+        Button wipe = new Button(this); wipe.setText("מחק את כל הנתונים מהמכשיר"); wipe.setTextColor(0xFFC62828); wipe.setAllCaps(false); wipe.setOnClickListener(v -> confirmWipe()); l.addView(wipe);
         l.addView(label("מהיר: " + (ok(fastFile()) ? "מותקן" : "לא מותקן") + " · איכות גבוהה: " + (ok(hqFile()) ? "מותקן" : "לא מותקן"), 13, Color.GRAY));
         new AlertDialog.Builder(this).setTitle("הגדרות").setView(l).setPositiveButton("שמור", (dd,w) -> {
+            String b0 = base.getText().toString().trim();
+            if (!b0.isEmpty() && !(b0.startsWith("https://") || b0.startsWith("http://")) || !cleartextOk(b0)) {
+                Toast.makeText(this, "כתובת שרת חייבת להיות https:// (http מותר רק לשרת הביתי 10.0.0.8)", Toast.LENGTH_LONG).show(); return; }
             prefs.edit().putString("base", base.getText().toString().trim().replaceAll("/+$","")).putString("token", tok.getText().toString().trim()).putBoolean("preferCloud", cloud.isChecked()).putBoolean("hq", hq.isChecked()).putBoolean("autoCopy", ac.isChecked()).apply();
             refreshModelUi(); warmUp(); }).setNegativeButton("ביטול", null).show();
     }
+    static boolean cleartextOk(String b) {
+        if (!b.startsWith("http://")) return true;
+        try { String h = new URL(b).getHost();
+            return h.equals("localhost") || h.equals("127.0.0.1") || h.equals("10.0.0.8"); // must match res/xml/network_security_config.xml
+        } catch (Exception e) { return false; }
+    }
+    static String sha256(File f) throws Exception {
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+        try (InputStream in = new FileInputStream(f)) { byte[] b = new byte[1 << 20]; int n; while ((n = in.read(b)) > 0) md.update(b, 0, n); }
+        StringBuilder sb = new StringBuilder(); for (byte x : md.digest()) sb.append(String.format("%02x", x)); return sb.toString();
+    }
+    TextView link(String t, Runnable r) {
+        TextView v = label(t + "   ", 14, 0xFF5B4FC9); v.setPaintFlags(v.getPaintFlags() | Paint.UNDERLINE_TEXT_FLAG); v.setOnClickListener(x -> r.run()); return v;
+    }
+    void openUrl(String url) {
+        try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); } catch (Exception e) { Toast.makeText(this, "לא ניתן לפתוח את הקישור", Toast.LENGTH_SHORT).show(); }
+    }
+    void info(String title, String body, String url) {
+        AlertDialog d = new AlertDialog.Builder(this).setTitle(title).setMessage(body).setPositiveButton("הבנתי", null)
+            .setNeutralButton("מסמך מלא", (x, w) -> openUrl(url)).show();
+        View m = d.findViewById(android.R.id.message); if (m != null) m.setTextDirection(View.TEXT_DIRECTION_RTL);
+    }
+    void confirmWipe() {
+        new AlertDialog.Builder(this).setTitle("מחיקת נתונים").setMessage("יימחקו מהטלפון: הגדרות, כתובת שרת וטוקן, ומודלי התמלול שהורדו (יהיה צריך להוריד שוב). תמלילים לא נשמרים באפליקציה ממילא. להמשיך?")
+            .setPositiveButton("מחק", (x, w) -> new Thread(() -> {
+                synchronized (LOCK) { if (wctx != 0) { Whisper.free(wctx); wctx = 0; wpath = null; } }
+                File[] fs = getFilesDir().listFiles(); if (fs != null) for (File f : fs) f.delete();
+                File[] cs = getCacheDir().listFiles(); if (cs != null) for (File f : cs) f.delete();
+                prefs.edit().clear().commit();
+                runOnUiThread(() -> { transcript.setText("התמלול יופיע כאן"); refreshModelUi(); Toast.makeText(this, "הנתונים נמחקו מהמכשיר", Toast.LENGTH_LONG).show(); });
+            }).start()).setNegativeButton("ביטול", null).show();
+    }
+    static final String DOCS = "https://github.com/erezbabayan/BabiTrans/blob/main/docs/";
+    static final String PRIVACY_URL = DOCS + "PRIVACY_HE.md", SECURITY_URL = DOCS + "SECURITY_HE.md", TERMS_URL = DOCS + "TERMS_HE.md";
+    static final String PRIVACY_HE =
+        "• ברירת המחדל: התמלול רץ בטלפון עצמו (whisper.cpp + מודל ivrit‑ai). השמע והתמליל לא יוצאים מהמכשיר.\n\n" +
+        "• אינטרנט נדרש רק להורדה חד‑פעמית של המודל מ‑GitHub Releases (ואופציונלית לשרת שבחרת).\n\n" +
+        "• שרת ענן הוא אופציונלי וכבוי כברירת מחדל. אם הזנת כתובת שרת וסימנת \"העדף שרת\" — השמע נשלח לשרת שהגדרת (למשל matamel שלך). אנחנו לא מפעילים שרת ציבורי.\n\n" +
+        "• תמלילים לא נשמרים באפליקציה; הם מוצגים, ואם בחרת — מועתקים ללוח ומוצגים בהתראה.\n\n" +
+        "• אין פרסומות, אין אנליטיקס, אין דיווחי קריסה לשרת, אין חשבון משתמש. גיבוי ענן של Android כבוי לאפליקציה.\n\n" +
+        "• \"מחק את כל הנתונים מהמכשיר\" בהגדרות מוחק הגדרות, טוקן ומודלים.";
+    static final String SECURITY_HE =
+        "• הורידו את BabiTrans רק מ‑github.com/erezbabayan/BabiTrans/releases. כל גרסה חתומה באותו מפתח — Android יסרב לעדכן מעל APK בחתימה אחרת.\n\n" +
+        "• Play Protect עשוי להזהיר על אפליקציה שלא מ‑Google Play. זה צפוי בהתקנה מ‑GitHub; אל תכבו את Play Protect. אם הוא מסמן את האפליקציה כמזיקה — אל תתקינו ודווחו.\n\n" +
+        "• אחרי ההתקנה אפשר לבטל שוב את \"התקנה ממקורות לא ידועים\" לדפדפן.\n\n" +
+        "• עדכון: פתחו את קישור releases/latest והתקינו מעל הגרסה הקיימת — ההגדרות והמודל נשמרים.\n\n" +
+        "• מודל התמלול מאומת ב‑SHA‑256 אחרי ההורדה; קובץ פגום נמחק.\n\n" +
+        "• הרשאות: אינטרנט והתראות בלבד. אין מיקרופון, אנשי קשר, מיקום או אחסון.\n\n" +
+        "• תעבורה: HTTPS בלבד, למעט השרת הביתי ברשת המקומית (10.0.0.8) אם הגדרת אותו.";
     String nameOf(Uri u) {
         try (Cursor c = getContentResolver().query(u, null, null, null, null)) {
             if (c != null && c.moveToFirst()) { int i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME); if (i >= 0) return c.getString(i); }
@@ -198,6 +258,8 @@ public class MainActivity extends Activity {
                         if (got - last > 4_000_000) { last = got; long g = got; ui("מוריד מודל… " + (g * 100 / MODEL_SIZE) + "% (" + g/1048576 + "/" + MODEL_SIZE/1048576 + "MB)"); } }
                 }
                 if (part.length() < MODEL_SIZE) throw new IOException("ההורדה לא הושלמה — לחצו שוב להמשך");
+                ui("מאמת חתימת SHA‑256 של המודל…");
+                if (!sha256(part).equals(hq ? HQ_SHA : FAST_SHA)) { part.delete(); throw new IOException("קובץ המודל לא תקין (SHA‑256) — נמחק, לחצו שוב"); }
                 if (!part.renameTo(dest)) throw new IOException("שמירה נכשלה");
                 runOnUiThread(() -> { busy = false; dlBtn.setEnabled(true); refreshModelUi(); Toast.makeText(this, "המודל הותקן", Toast.LENGTH_SHORT).show(); warmUp();
                     if (pending != null) { List<Uri> p = pending; pending = null; transcribe(p); } });

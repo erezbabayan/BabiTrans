@@ -1,0 +1,4 @@
+title = "BabiTrans"
+
+[extend]
+useDefault = true
