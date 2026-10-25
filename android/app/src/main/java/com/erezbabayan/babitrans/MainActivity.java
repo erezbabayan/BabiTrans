@@ -46,7 +46,10 @@ public class MainActivity extends Activity {
         ScrollView sv = new ScrollView(this); sv.setBackgroundColor(NAVY);
         root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(48,64,48,48);
         root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL); sv.addView(root);
-        TextView title = label("BabiTrans · מתמלל", 28, YELLOW); title.setTypeface(Typeface.DEFAULT_BOLD); root.addView(title);
+        ImageView logo = new ImageView(this); logo.setImageResource(R.drawable.logo_babitrans); logo.setAdjustViewBounds(true);
+        GradientDrawable ld = new GradientDrawable(); ld.setColor(0xFFFFF9EB); ld.setCornerRadius(36); logo.setBackground(ld);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2); lp.bottomMargin = 16; logo.setLayoutParams(lp); root.addView(logo);
+        TextView title = label("מתמלל הודעות קוליות", 22, YELLOW); title.setTypeface(Typeface.DEFAULT_BOLD); root.addView(title);
         root.addView(label("שתפו הודעה קולית מוואטסאפ ל‑BabiTrans, או בחרו קובץ. התמלול רץ על המכשיר — בלי שרת ובלי אינטרנט.", 15, CREAM));
         status = label("", 15, YELLOW); root.addView(status);
         LinearLayout card = new LinearLayout(this); card.setOrientation(LinearLayout.VERTICAL); card.setPadding(40,40,40,40);
@@ -77,6 +80,10 @@ public class MainActivity extends Activity {
         CheckBox ac = new CheckBox(this); ac.setText("העתק תמלול אוטומטית ללוח"); ac.setChecked(prefs.getBoolean("autoCopy", true)); l.addView(ac);
         Button pm = new Button(this); pm.setText("טען קובץ מודל ‎.bin‎ מהטלפון"); pm.setAllCaps(false); l.addView(pm);
         pm.setOnClickListener(v -> { Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("*/*"); startActivityForResult(i, PICK_MODEL); });
+        LinearLayout about = new LinearLayout(this); about.setOrientation(LinearLayout.HORIZONTAL); about.setGravity(Gravity.CENTER_VERTICAL); about.setPadding(0,32,0,0);
+        ImageView ai = new ImageView(this); ai.setImageResource(R.drawable.logo_bubble); about.addView(ai, new LinearLayout.LayoutParams(120,120));
+        String ver = ""; try { ver = getPackageManager().getPackageInfo(getPackageName(),0).versionName; } catch (Exception ignored) {}
+        TextView at = label("  BabiTrans v" + ver + " · תמלול עברי במכשיר", 14, Color.GRAY); about.addView(at); l.addView(about);
         l.addView(label("מהיר: " + (ok(fastFile()) ? "מותקן" : "לא מותקן") + " · איכות גבוהה: " + (ok(hqFile()) ? "מותקן" : "לא מותקן"), 13, Color.GRAY));
         new AlertDialog.Builder(this).setTitle("הגדרות").setView(l).setPositiveButton("שמור", (dd,w) -> {
             prefs.edit().putString("base", base.getText().toString().trim().replaceAll("/+$","")).putString("token", tok.getText().toString().trim()).putBoolean("preferCloud", cloud.isChecked()).putBoolean("hq", hq.isChecked()).putBoolean("autoCopy", ac.isChecked()).apply();
