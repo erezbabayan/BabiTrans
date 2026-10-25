@@ -12,7 +12,7 @@ public class TranscribeService extends Service {
     static final String CH_RUN = "running", CH_DONE = "done"; static final int FG_ID = 100;
     static final class Job {
         final int id; final Uri uri; final String name; final boolean cloud;
-        volatile String state = "ממתין בתור"; volatile int audioSecs = -1; volatile long startMs, endMs, etaMs, sttMs, waitMs; volatile boolean done, failed, cancelled, inNative, hqModel; volatile int prog = -1; volatile String text = ""; volatile Thread worker;
+        volatile String state = "ממתין בתור"; volatile int audioSecs = -1; volatile long startMs, endMs, etaMs, estMs, sttMs, waitMs; volatile boolean done, failed, cancelled, inNative, hqModel; volatile int prog = -1; volatile String text = ""; volatile Thread worker;
         Job(int id, Uri u, String n, boolean c) { this.id = id; uri = u; name = n; cloud = c; }
         /** Seconds left (estimated), or -1 if unknown. */
         long remaining() { if (done || etaMs <= 0) return -1; return Math.max(0, (etaMs - System.currentTimeMillis() + 999) / 1000); }
@@ -156,13 +156,17 @@ public class TranscribeService extends Service {
                 // v0.3.8: short notes (audio_ctx fast path) and long notes (full 30s windows) have very different cost per
                 // audio-second; 0.3.7 learned ONE rtf, so a few fast short notes made long notes' estimate/timeout far too small
                 // (=> "לוקח יותר מהצפוי" then TIMEOUT). Separate keys + device-realistic defaults + generous watchdog.
-                boolean hq = mp.contains("q5"), shortNote = secs < 28;
-                String key = "rtf2_" + (hq ? "hq" : "fast") + (shortNote ? "_s" : "_l");
-                float rtf = prefs.getFloat(key, hq ? (shortNote ? 0.9f : 1.1f) : (shortNote ? 0.3f : 0.35f));
-                int eff = shortNote ? secs : (int) Math.ceil(secs / 30.0) * 30; // >28s runs full 30s windows
+                // v0.3.9: native side now chunks every note into <=28s pieces with audio_ctx sized to real length
+                // (no padded 30s encoder windows), so cost per audio-second is ~uniform -> one learned rtf per model.
+                boolean hq = mp.contains("q5");
+                String key = "rtf3_" + (hq ? "hq" : "fast");
+                float rtf = prefs.getFloat(key, hq ? 1.2f : 0.5f);
+                int eff = secs;
                 long est = (long) (1000 * (1.5 + eff * rtf));
-                // watchdog: only for a truly hung engine. short: max(60s, 5x est); long: max(180s, 3x audio, 5x est)
-                int timeout = (int) Math.max(shortNote ? 60 : Math.max(180, secs * 3), est * 5 / 1000);
+                j.estMs = est;
+                // watchdog for a truly hung engine: max(60s, 2x audio, 3x estimate). Native also aborts a single
+                // chunk whose encode exceeds max(25s, 2.5x chunk length) -> STALL.
+                int timeout = (int) Math.max(Math.max(60, secs * 2), est * 3 / 1000);
                 j.state = "ממתין למנוע"; j.waitMs = System.currentTimeMillis(); changed();
                 long t1;
                 STT.lockInterruptibly();
@@ -174,11 +178,13 @@ public class TranscribeService extends Service {
                         j.inNative = true;
                         // Java-side watchdog in case native abort_callback is never polled (hung inside a kernel)
                         final int to = timeout; BG.postDelayed(() -> { if (j.inNative && !j.cancelled) { j.cancelled = true; Whisper.cancel(j.id); hardStopLater(j, HARD_MS); } }, to * 1000L + 5000);
-                        try { t = Whisper.transcribe(wctx, pcm, "he", 6, j.id, timeout); } finally { j.inNative = false; } }
+                        try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_FOREGROUND); } catch (Throwable ignored) {}
+                        try { t = Whisper.transcribe(wctx, pcm, "he", 4, j.id, timeout); } finally { j.inNative = false; } }
                     finally { RW.readLock().unlock(); }
                 } finally { STT.unlock(); }
                 if ("\u0001CANCEL".equals(t)) throw new IOException("בוטל");
-                if ("\u0001TIMEOUT".equals(t)) { prefs.edit().putFloat(key, Math.min(5f, rtf * 2f)).apply(); throw new IOException("התמלול נעצר אחרי " + timeout + " שנ׳ (חריגה מזמן) — נסו שוב"); }
+                if ("\u0001TIMEOUT".equals(t)) { prefs.edit().putFloat(key, Math.min(5f, rtf * 2f)).apply(); throw new IOException("התמלול נעצר אחרי " + timeout + " שנ׳ (חריגה מזמן) — נסו שוב, רצוי כשהאפליקציה פתוחה והטלפון לא במצב חיסכון בסוללה"); }
+                if ("\u0001STALL".equals(t)) { prefs.edit().putFloat(key, Math.min(5f, rtf * 2f)).apply(); throw new IOException("עיבוד השמע נתקע (המעבד איטי מדי כרגע) — כבו חיסכון בסוללה, השאירו את האפליקציה פתוחה ונסו שוב"); }
                 t = t.trim();
                 float got = ((System.currentTimeMillis() - t1) / 1000f - 1.5f) / eff;
                 if (got > 0.01f && got < 5f) /* learn both up and down */ prefs.edit().putFloat(key, rtf * 0.6f + got * 0.4f).apply();

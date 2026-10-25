@@ -209,11 +209,13 @@ public class MainActivity extends Activity {
         long r = j.remaining();
         String eta = "";
         if ("מתמלל".equals(j.state)) {
-            int p = j.prog, ph = p < 0 ? 0 : (p >>> 24), tok = p < 0 ? 0 : ((p >>> 8) & 0xFFFF), pct = p < 0 ? 0 : (p & 0xFF);
-            String live = ph == 2 ? " · מפענח מילים (" + tok + ")" : ph == 1 ? " · מעבד שמע" : "";
+            int p = j.prog, ph = p < 0 ? 0 : (p >>> 28), ci = p < 0 ? 0 : ((p >>> 24) & 0xF), nc = p < 0 ? 1 : ((p >>> 20) & 0xF), tok = p < 0 ? 0 : ((p >>> 8) & 0xFFF), pct = p < 0 ? 0 : (p & 0xFF);
+            String part = nc > 1 ? " חלק " + (ci + 1) + "/" + nc : "";
+            String live = ph == 2 ? " · מפענח מילים" + part + " (" + tok + ")" : ph == 1 ? " · מעבד שמע" + part + (tok > 0 ? " (" + tok + " מילים עד כה)" : "") : "";
             if (pct > 0 && pct < 100) live += " · " + pct + "%";
             if (r > 0) eta = live + " · נותרו ~" + fmt(r);
-            else eta = live + " · עוד מעט" + (j.hqModel ? " (מודל איטי)" : "");
+            else if (System.currentTimeMillis() - j.etaMs < j.estMs / 2) eta = live + " · עוד מעט" + (j.hqModel ? " (מודל איטי)" : "");
+            else eta = live + " · איטי מהצפוי — אפשר לבטל ולנסות שוב" + (j.hqModel ? " (מודל איטי)" : "");
             long run = j.sttMs > 0 ? (System.currentTimeMillis() - j.sttMs) / 1000 : j.elapsed();
             return "● " + j.name + " — " + j.state + a + " · " + fmt(run) + eta;
         } else if ("ממתין למנוע".equals(j.state)) {
