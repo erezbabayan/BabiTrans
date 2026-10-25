@@ -50,7 +50,7 @@ public class MainActivity extends Activity {
         root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL); sv.addView(root);
         ImageView logo = new ImageView(this); logo.setImageResource(R.drawable.logo_babitrans); logo.setAdjustViewBounds(true);
         GradientDrawable ld = new GradientDrawable(); ld.setColor(0xFFFFF9EB); ld.setCornerRadius(24); logo.setBackground(ld); logo.setPadding(8,8,8,8);
-        int lsz = (int) (72 * getResources().getDisplayMetrics().density); // compact header (was full-width)
+        int lsz = (int) (52 * getResources().getDisplayMetrics().density); // compact header (was full-width)
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(lsz, lsz); lp.bottomMargin = 16; lp.gravity = Gravity.CENTER_HORIZONTAL; logo.setLayoutParams(lp); root.addView(logo);
         TextView title = label("מתמלל הודעות קוליות", 22, YELLOW); title.setTypeface(Typeface.DEFAULT_BOLD); root.addView(title);
         root.addView(label("שתפו הודעה קולית מוואטסאפ ל‑BabiTrans, או בחרו קובץ. התמלול רץ על המכשיר — בלי שרת ובלי אינטרנט.", 15, CREAM));
@@ -198,7 +198,11 @@ public class MainActivity extends Activity {
         if (j.done) return (j.failed ? "✗ " : "✓ ") + j.name + " — " + j.state + " (" + fmt(j.elapsed()) + ")";
         if (j.startMs == 0) return "⏳ " + j.name + " — ממתין בתור";
         long r = j.remaining();
-        String eta = "מתמלל".equals(j.state) ? (r > 0 ? " · נותרו ~" + fmt(r) : " · עוד רגע…") : "";
+        String eta = "";
+        if ("מתמלל".equals(j.state)) {
+            if (r <= 0 && j.sttMs > 0) r = Math.max(3, (System.currentTimeMillis() - j.sttMs) / 1000 / 3); // over estimate: keep a real countdown-ish figure
+            eta = " · נותרו ~" + fmt(Math.max(1, r));
+        } else if ("ממתין למנוע".equals(j.state)) eta = " · ממתין לסיום התמלול הקודם";
         return "● " + j.name + " — " + j.state + a + " · עבר " + fmt(j.elapsed()) + eta;
     }
     void renderJobs() {

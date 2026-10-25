@@ -12,7 +12,7 @@ public class TranscribeService extends Service {
     static final String CH_RUN = "running", CH_DONE = "done"; static final int FG_ID = 100;
     static final class Job {
         final int id; final Uri uri; final String name; final boolean cloud;
-        volatile String state = "ממתין בתור"; volatile int audioSecs = -1; volatile long startMs, endMs, etaMs; volatile boolean done, failed, cancelled; volatile String text = "";
+        volatile String state = "ממתין בתור"; volatile int audioSecs = -1; volatile long startMs, endMs, etaMs, sttMs; volatile boolean done, failed, cancelled; volatile String text = "";
         Job(int id, Uri u, String n, boolean c) { this.id = id; uri = u; name = n; cloud = c; }
         /** Seconds left (estimated), or -1 if unknown. */
         long remaining() { if (done || etaMs <= 0) return -1; return Math.max(0, (etaMs - System.currentTimeMillis() + 999) / 1000); }
@@ -25,6 +25,8 @@ public class TranscribeService extends Service {
     static long wctx = 0; static String wpath = null;
     static final ReentrantReadWriteLock RW = new ReentrantReadWriteLock();
     static ExecutorService pool; static int maxPar = 2;
+    /** Native STT is strictly one-at-a-time: concurrent whisper_full on a shared context (even with separate states) thrashed/hung on device. Decode stays parallel. */
+    static final java.util.concurrent.locks.ReentrantLock STT = new java.util.concurrent.locks.ReentrantLock(true);
     static final Set<Integer> active = ConcurrentHashMap.newKeySet();
     PowerManager.WakeLock wl; final Handler h = new Handler(Looper.getMainLooper());
 
@@ -117,24 +119,27 @@ public class TranscribeService extends Service {
                 int secs = Math.max(1, pcm.length / 16000); j.audioSecs = secs;
                 String mp = MainActivity.modelFile(this).getAbsolutePath();
                 if (wctx == 0 || !mp.equals(wpath)) { j.state = "טוען מודל"; changed(); ensureCtx(mp); }
-                int par = Math.max(1, Math.min(maxPar, active.size()));
-                int threads = par > 1 ? 3 : 6; // S23: 6 threads solo, 3+3 when two jobs run side by side
                 String key = "rtf_" + (mp.contains("q5") ? "hq" : "fast");
                 float rtf = prefs.getFloat(key, mp.contains("q5") ? 0.35f : 0.15f); // processing sec per audio sec, learned
                 int eff = secs < 28 ? secs : (int) Math.ceil(secs / 30.0) * 30; // >28s runs full 30s windows
-                long est = (long) (1000 * (1.5 + eff * rtf * par));
-                j.etaMs = System.currentTimeMillis() + est; j.state = "מתמלל"; changed();
-                // watchdog: never let a job spin forever (generous: 10x the estimate, at least 3 min)
-                int timeout = (int) Math.max(180, est / 100);
-                long t1 = System.currentTimeMillis();
-                RW.readLock().lock();
-                try { if (wctx == 0 || !mp.equals(wpath)) throw new IOException("טעינת המודל נכשלה — נסו להוריד אותו שוב");
-                    t = Whisper.transcribe(wctx, pcm, "he", threads, j.id, timeout); }
-                finally { RW.readLock().unlock(); }
+                long est = (long) (1000 * (1.5 + eff * rtf));
+                // watchdog: 4x estimate, min 60s, so a hung note fails fast instead of spinning for minutes
+                int timeout = (int) Math.max(60, est * 4 / 1000);
+                j.state = "ממתין למנוע"; changed();
+                long t1;
+                STT.lockInterruptibly();
+                try {
+                    RW.readLock().lock();
+                    try { if (j.cancelled) throw new IOException("בוטל");
+                        if (wctx == 0 || !mp.equals(wpath)) throw new IOException("טעינת המודל נכשלה — נסו להוריד אותו שוב");
+                        t1 = System.currentTimeMillis(); j.sttMs = t1; j.etaMs = t1 + est; j.state = "מתמלל"; changed();
+                        t = Whisper.transcribe(wctx, pcm, "he", 6, j.id, timeout); }
+                    finally { RW.readLock().unlock(); }
+                } finally { STT.unlock(); }
                 if ("\u0001CANCEL".equals(t)) throw new IOException("בוטל");
                 if ("\u0001TIMEOUT".equals(t)) throw new IOException("התמלול נעצר אחרי " + timeout + " שנ׳ (חריגה מזמן) — נסו שוב");
                 t = t.trim();
-                float got = ((System.currentTimeMillis() - t1) / 1000f - 1.5f) / eff / par;
+                float got = ((System.currentTimeMillis() - t1) / 1000f - 1.5f) / eff;
                 if (got > 0.01f && got < 5f) prefs.edit().putFloat(key, rtf * 0.6f + got * 0.4f).apply();
             }
             j.text = t; j.state = "הסתיים";
