@@ -36,7 +36,10 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_erezbabayan_babitrans_Whisper_tran
   // Short-note fast path: the encoder normally always processes a 30s window (1500 frames).
   // For a 6s note that is ~5x wasted work. audio_ctx = frames actually needed (+margin), rounded to 64.
   // 1 encoder frame = 320 samples @16k (20ms).
-  if(n < 16000*28){ int need=(int)(n/320)+96; need=((need+63)/64)*64; p.audio_ctx=std::min(1500,std::max(256,need)); p.single_segment=true; }
+  if(n < 16000*28){ int need=(int)(n/320)+96; need=((need+63)/64)*64; p.audio_ctx=std::min(1500,std::max(256,need)); p.single_segment=true;
+    // v0.3.8: cap tokens (~6/s of speech + margin). Without a cap a greedy repetition loop (temperature fallback is off)
+    // can emit ~220 tokens and stretch a 10s note to minutes on the phone.
+    p.max_tokens=std::max(32,(int)(n/16000)*6+24); }
   else p.single_segment=false;
   p.temperature=0.0f; p.temperature_inc=0.0f; // no costly fallback re-decodes
   p.suppress_blank=true; p.suppress_nst=true;

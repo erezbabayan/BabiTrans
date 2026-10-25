@@ -183,7 +183,7 @@ public class MainActivity extends Activity {
         String which = modelFile().equals(fastFile()) ? "מהיר" : "איכות גבוהה";
         status.setText(!ok ? "להפעלה ראשונה: הורידו את מודל התמלול פעם אחת (~450MB, מומלץ Wi‑Fi). אחר כך הכול עובד בלי אינטרנט."
             : miss ? "⚠ מותקן רק המודל האיטי (איכות גבוהה) — תמלול איטי פי ~3. הורידו את המודל המהיר בכפתור למטה; הוא ישמש אוטומטית."
-            : "מוכן — תמלול במכשיר (ivrit‑ai turbo · " + which + ")");
+            : "מוכן — תמלול במכשיר (ivrit‑ai turbo · " + which + ")" + (which.equals("מהיר") ? " ⚡ המודל המהיר כבר מותקן ופעיל" : ""));
     }
     void transcribe(List<Uri> uris) {
         String base = prefs.getString("base","");
@@ -213,8 +213,13 @@ public class MainActivity extends Activity {
             String live = ph == 2 ? " · מפענח מילים (" + tok + ")" : ph == 1 ? " · מעבד שמע" : "";
             if (pct > 0 && pct < 100) live += " · " + pct + "%";
             if (r > 0) eta = live + " · נותרו ~" + fmt(r);
-            else eta = live + " · לוקח יותר מהצפוי" + (j.hqModel ? " (מודל איטי)" : "");
-        } else if ("ממתין למנוע".equals(j.state)) eta = " · ממתין לסיום התמלול הקודם";
+            else eta = live + " · עוד מעט" + (j.hqModel ? " (מודל איטי)" : "");
+            long run = j.sttMs > 0 ? (System.currentTimeMillis() - j.sttMs) / 1000 : j.elapsed();
+            return "● " + j.name + " — " + j.state + a + " · " + fmt(run) + eta;
+        } else if ("ממתין למנוע".equals(j.state)) {
+            long w = j.waitMs > 0 ? (System.currentTimeMillis() - j.waitMs) / 1000 : 0;
+            return "⏳ " + j.name + a + " — ממתין למנוע (בתור אחרי התמלול הקודם, " + fmt(w) + ")";
+        }
         return "● " + j.name + " — " + j.state + a + " · עבר " + fmt(j.elapsed()) + eta;
     }
     void renderJobs() {

@@ -12,7 +12,7 @@ public class TranscribeService extends Service {
     static final String CH_RUN = "running", CH_DONE = "done"; static final int FG_ID = 100;
     static final class Job {
         final int id; final Uri uri; final String name; final boolean cloud;
-        volatile String state = "ממתין בתור"; volatile int audioSecs = -1; volatile long startMs, endMs, etaMs, sttMs; volatile boolean done, failed, cancelled, inNative, hqModel; volatile int prog = -1; volatile String text = ""; volatile Thread worker;
+        volatile String state = "ממתין בתור"; volatile int audioSecs = -1; volatile long startMs, endMs, etaMs, sttMs, waitMs; volatile boolean done, failed, cancelled, inNative, hqModel; volatile int prog = -1; volatile String text = ""; volatile Thread worker;
         Job(int id, Uri u, String n, boolean c) { this.id = id; uri = u; name = n; cloud = c; }
         /** Seconds left (estimated), or -1 if unknown. */
         long remaining() { if (done || etaMs <= 0) return -1; return Math.max(0, (etaMs - System.currentTimeMillis() + 999) / 1000); }
@@ -22,7 +22,7 @@ public class TranscribeService extends Service {
     static volatile Runnable listener; // MainActivity refresh hook (called on any thread)
     static int nextId = 1;
     // Engine: one model ctx, shared by concurrent jobs (read lock); load/free/wipe take the write lock.
-    static long wctx = 0; static String wpath = null;
+    static volatile long wctx = 0; static volatile String wpath = null;
     static final ReentrantReadWriteLock RW = new ReentrantReadWriteLock();
     static ExecutorService pool; static int maxPar = 2;
     /** Native STT is strictly one-at-a-time: concurrent whisper_full on a shared context (even with separate states) thrashed/hung on device. Decode stays parallel. */
@@ -31,6 +31,9 @@ public class TranscribeService extends Service {
     PowerManager.WakeLock wl; final Handler h = new Handler(Looper.getMainLooper());
 
     static void ensureCtx(String path) {
+        // v0.3.8 fast path: already loaded -> don't queue for the write lock (a waiting writer blocks new readers,
+        // so a warm-up on every app open used to stall the next job behind the running one).
+        if (wctx != 0 && path.equals(wpath)) return;
         RW.writeLock().lock();
         try { if (wctx != 0 && path.equals(wpath)) return;
             if (wctx != 0) { Whisper.free(wctx); wctx = 0; wpath = null; }
@@ -150,13 +153,17 @@ public class TranscribeService extends Service {
                 if (wctx == 0 || !mp.equals(wpath)) { j.state = "טוען מודל…"; changed(); long l0 = System.currentTimeMillis(); ensureCtx(mp);
                     android.util.Log.i("BabiTrans", "model load " + (System.currentTimeMillis() - l0) + "ms " + mp); }
                 if (j.cancelled) throw new IOException("בוטל");
-                String key = "rtf_" + (mp.contains("q5") ? "hq" : "fast");
-                float rtf = prefs.getFloat(key, mp.contains("q5") ? 0.35f : 0.15f); // processing sec per audio sec, learned
-                int eff = secs < 28 ? secs : (int) Math.ceil(secs / 30.0) * 30; // >28s runs full 30s windows
+                // v0.3.8: short notes (audio_ctx fast path) and long notes (full 30s windows) have very different cost per
+                // audio-second; 0.3.7 learned ONE rtf, so a few fast short notes made long notes' estimate/timeout far too small
+                // (=> "לוקח יותר מהצפוי" then TIMEOUT). Separate keys + device-realistic defaults + generous watchdog.
+                boolean hq = mp.contains("q5"), shortNote = secs < 28;
+                String key = "rtf2_" + (hq ? "hq" : "fast") + (shortNote ? "_s" : "_l");
+                float rtf = prefs.getFloat(key, hq ? (shortNote ? 0.9f : 1.1f) : (shortNote ? 0.3f : 0.35f));
+                int eff = shortNote ? secs : (int) Math.ceil(secs / 30.0) * 30; // >28s runs full 30s windows
                 long est = (long) (1000 * (1.5 + eff * rtf));
-                // watchdog: 4x estimate; floor 30s for short notes (<=15s audio), 60s otherwise — a hung note fails fast
-                int timeout = (int) Math.max(secs <= 15 ? 30 : 60, est * 4 / 1000);
-                j.state = "ממתין למנוע"; changed();
+                // watchdog: only for a truly hung engine. short: max(60s, 5x est); long: max(180s, 3x audio, 5x est)
+                int timeout = (int) Math.max(shortNote ? 60 : Math.max(180, secs * 3), est * 5 / 1000);
+                j.state = "ממתין למנוע"; j.waitMs = System.currentTimeMillis(); changed();
                 long t1;
                 STT.lockInterruptibly();
                 try {
@@ -171,10 +178,10 @@ public class TranscribeService extends Service {
                     finally { RW.readLock().unlock(); }
                 } finally { STT.unlock(); }
                 if ("\u0001CANCEL".equals(t)) throw new IOException("בוטל");
-                if ("\u0001TIMEOUT".equals(t)) throw new IOException("התמלול נעצר אחרי " + timeout + " שנ׳ (חריגה מזמן) — נסו שוב");
+                if ("\u0001TIMEOUT".equals(t)) { prefs.edit().putFloat(key, Math.min(5f, rtf * 2f)).apply(); throw new IOException("התמלול נעצר אחרי " + timeout + " שנ׳ (חריגה מזמן) — נסו שוב"); }
                 t = t.trim();
                 float got = ((System.currentTimeMillis() - t1) / 1000f - 1.5f) / eff;
-                if (got > 0.01f && got < 5f) prefs.edit().putFloat(key, rtf * 0.6f + got * 0.4f).apply();
+                if (got > 0.01f && got < 5f) /* learn both up and down */ prefs.edit().putFloat(key, rtf * 0.6f + got * 0.4f).apply();
             }
             j.text = t; j.state = "הסתיים";
             if (j.cancelled) throw new IOException("בוטל");
