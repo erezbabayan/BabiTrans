@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+faster-whisper>=1.0.3
+av>=14,<16  # av 16+ breaks faster-whisper decode_audio (metadata_errors kwarg)

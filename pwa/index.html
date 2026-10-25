@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#14112B">
+<title>מתמלל</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main class="bs-card" id="card">
+  <button id="btnSettings" class="gear" aria-label="הגדרות">⚙</button>
+  <div class="logo-wrap" id="logoWrap"><div class="glow-ring r1"></div><div class="glow-ring r2"></div><div class="logo">מ</div></div>
+
+  <section id="home" class="screen">
+    <h1>מתמלל</h1>
+    <p class="sub" id="sub">שתפו הודעה קולית או בחרו קובץ</p>
+    <label id="drop" class="dropzone" tabindex="0">
+      <span class="btn primary big">בחירת קובץ שמע</span>
+      <span class="dz-hint">או גררו קובץ לכאן</span>
+      <input type="file" id="pick" accept="audio/*,.ogg,.opus,.m4a,.mp3,.wav">
+    </label>
+    <div class="status" id="status">בודק מנוע…</div>
+    <p class="hint">מוואטסאפ: שתף ← מתמלל</p>
+  </section>
+
+  <section id="working" class="screen hidden">
+    <h1>מתמלל…</h1>
+    <p class="sub" id="workInfo"></p>
+    <div class="spinner"></div>
+  </section>
+
+  <section id="result" class="screen hidden">
+    <h1>התמלול</h1>
+    <div id="text" class="transcript" dir="auto"></div>
+    <p class="meta" id="meta"></p>
+    <div class="row"><button id="btnCopy" class="btn primary">העתק</button><button id="btnDone" class="btn ghost">סיום</button></div>
+  </section>
+
+  <section id="settings" class="screen hidden">
+    <h1>הגדרות</h1>
+    <label>כתובת שרת<input id="base" placeholder="(אותו מקור)" dir="ltr"></label>
+    <label>טוקן (לא חובה)<input id="token" dir="ltr"></label>
+    <div class="row"><button id="btnSave" class="btn primary">שמור</button><button id="btnTest" class="btn ghost">בדוק</button><button id="btnBack" class="btn ghost">חזרה</button></div>
+    <p id="testOut" class="meta"></p>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
