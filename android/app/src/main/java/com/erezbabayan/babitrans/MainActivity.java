@@ -66,7 +66,7 @@ public class MainActivity extends Activity {
         root.addView(btn("בחר קובץ שמע", PURPLE, CREAM, v -> {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("audio/*");
             startActivityForResult(i, PICK); }));
-        dlBtn = btn("הורד מודל תמלול מהיר (חד‑פעמי, ~450MB)", YELLOW, NAVY, v -> downloadModel()); root.addView(dlBtn);
+        dlBtn = btn("הורד מודל תמלול מהיר (חד‑פעמי, ~450MB)", YELLOW, NAVY, v -> { if (DownloadService.running) downloadModel(); else downloadFast(); }); root.addView(dlBtn);
         root.addView(btn("הגדרות", NAVY, YELLOW, v -> showSettings()));
         setContentView(sv);
     }
@@ -80,7 +80,7 @@ public class MainActivity extends Activity {
         base.setText(prefs.getString("base","")); EditText tok = new EditText(this); tok.setHint("X-Matamel-Token (אופציונלי)");
         tok.setText(prefs.getString("token","")); l.addView(label("גיבוי בענן (אופציונלי): כתובת שרת matamel. ריק = תמלול במכשיר בלבד.",14,Color.GRAY)); l.addView(base); l.addView(tok);
         CheckBox cloud = new CheckBox(this); cloud.setText("העדף שרת על פני תמלול במכשיר"); cloud.setChecked(prefs.getBoolean("preferCloud", false)); l.addView(cloud);
-        CheckBox hq = new CheckBox(this); hq.setText("איכות גבוהה (איטי יותר, מודל ~550MB)"); hq.setChecked(prefs.getBoolean("hq", false)); l.addView(hq);
+        CheckBox hq = new CheckBox(this); hq.setText("הורדות: מודל איכות גבוהה (איטי פי ~3, ~550MB; המהיר תמיד מועדף אם מותקן)"); hq.setChecked(prefs.getBoolean("hq", false)); l.addView(hq);
         CheckBox ac = new CheckBox(this); ac.setText("העתק תמלול אוטומטית ללוח"); ac.setChecked(prefs.getBoolean("autoCopy", true)); l.addView(ac);
         Button pm = new Button(this); pm.setText("טען קובץ מודל ‎.bin‎ מהטלפון"); pm.setAllCaps(false); l.addView(pm);
         pm.setOnClickListener(v -> { Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("*/*"); startActivityForResult(i, PICK_MODEL); });
@@ -159,14 +159,16 @@ public class MainActivity extends Activity {
     }
     File fastFile() { return new File(getFilesDir(), "ivrit-turbo-q4_0.bin"); }
     File hqFile() { return new File(getFilesDir(), "ivrit-turbo-q5_0.bin"); }
+    /** v0.3.7: the fast q4 model ALWAYS wins when installed (q5 is ~3x slower on S23; old installs had hq=true stuck from the v0.2 q5 download). */
     static File modelFile(Context c) { File f = new File(c.getFilesDir(), "ivrit-turbo-q4_0.bin"), q = new File(c.getFilesDir(), "ivrit-turbo-q5_0.bin");
-        boolean hq = c.getSharedPreferences("cfg", MODE_PRIVATE).getBoolean("hq", false); File want = hq ? q : f, other = hq ? f : q; return ok(want) || !ok(other) ? want : other; }
+        return ok(f) || !ok(q) ? f : q; }
     static boolean ok(File f) { return f.exists() && f.length() > 50_000_000L; }
     boolean wantHq() { return prefs.getBoolean("hq", false); }
     /** Preferred model if installed, else whichever is installed (v0.2 users keep working with q5 right away). */
-    File modelFile() { File want = wantHq() ? hqFile() : fastFile(), other = wantHq() ? fastFile() : hqFile(); return ok(want) || !ok(other) ? want : other; }
+    File modelFile() { return modelFile(this); }
     boolean modelReady() { return ok(modelFile()); }
-    boolean preferredMissing() { return !ok(wantHq() ? hqFile() : fastFile()); }
+    boolean preferredMissing() { return !ok(fastFile()); }
+    boolean onlySlow() { return !ok(fastFile()) && ok(hqFile()); }
     /** Load the model in the background as soon as the app opens, so a WhatsApp share doesn't pay the cold load. */
     void warmUp() {
         if (!modelReady()) return; final String path = modelFile().getAbsolutePath();
@@ -177,10 +179,10 @@ public class MainActivity extends Activity {
         boolean ok = modelReady();
         boolean miss = preferredMissing();
         dlBtn.setVisibility(miss ? View.VISIBLE : View.GONE);
-        dlBtn.setText(wantHq() ? "הורד מודל איכות גבוהה (חד‑פעמי, ~550MB)" : "הורד מודל תמלול מהיר (חד‑פעמי, ~450MB)");
+        dlBtn.setText(onlySlow() ? "⚡ הורד מודל מהיר — פי 3 יותר מהר (~450MB, מומלץ Wi‑Fi)" : "הורד מודל תמלול מהיר (חד‑פעמי, ~450MB)");
         String which = modelFile().equals(fastFile()) ? "מהיר" : "איכות גבוהה";
         status.setText(!ok ? "להפעלה ראשונה: הורידו את מודל התמלול פעם אחת (~450MB, מומלץ Wi‑Fi). אחר כך הכול עובד בלי אינטרנט."
-            : miss ? "מוכן (מודל " + which + "). מומלץ להוריד את המודל המהיר — תמלול הודעות קצרות מהיר פי כמה."
+            : miss ? "⚠ מותקן רק המודל האיטי (איכות גבוהה) — תמלול איטי פי ~3. הורידו את המודל המהיר בכפתור למטה; הוא ישמש אוטומטית."
             : "מוכן — תמלול במכשיר (ivrit‑ai turbo · " + which + ")");
     }
     void transcribe(List<Uri> uris) {
@@ -189,6 +191,13 @@ public class MainActivity extends Activity {
         if (!cloud && !modelReady()) { pending = uris; status.setText("כדי לתמלל צריך קודם להוריד את המודל (פעם אחת). מתחיל הורדה…"); downloadModel(); return; }
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0)
             Toast.makeText(this, "אפשרו התראות כדי לקבל את התמלול כשאתם באפליקציה אחרת", Toast.LENGTH_LONG).show();
+        if (!cloud && onlySlow() && !DownloadService.running && !prefs.getBoolean("nagQ4Off", false)) {
+            new AlertDialog.Builder(this).setTitle("התמלול יהיה איטי")
+                .setMessage("מותקן אצלך רק המודל האיטי (איכות גבוהה) — הודעה קצרה יכולה לקחת פי 3 יותר זמן. מומלץ להוריד פעם אחת את המודל המהיר (~450MB, עדיף ב‑Wi‑Fi). התמלול הנוכחי ימשיך במודל האיטי, ומרגע שהמהיר יורד — הוא ישמש אוטומטית.")
+                .setPositiveButton("הורד מודל מהיר", (d, w) -> downloadFast())
+                .setNegativeButton("לא עכשיו", null)
+                .setNeutralButton("אל תשאל שוב", (d, w) -> prefs.edit().putBoolean("nagQ4Off", true).apply()).show();
+        }
         TranscribeService.enqueue(this, uris, cloud); // runs in a foreground service — you can leave the app
         Toast.makeText(this, uris.size() > 1 ? "נוספו " + uris.size() + " תמלולים — אפשר לעבור לאפליקציה אחרת" : "התמלול רץ ברקע — אפשר לעבור לאפליקציה אחרת", Toast.LENGTH_SHORT).show();
     }
@@ -200,8 +209,11 @@ public class MainActivity extends Activity {
         long r = j.remaining();
         String eta = "";
         if ("מתמלל".equals(j.state)) {
-            if (r <= 0 && j.sttMs > 0) r = Math.max(3, (System.currentTimeMillis() - j.sttMs) / 1000 / 3); // over estimate: keep a real countdown-ish figure
-            eta = " · נותרו ~" + fmt(Math.max(1, r));
+            int p = j.prog, ph = p < 0 ? 0 : (p >>> 24), tok = p < 0 ? 0 : ((p >>> 8) & 0xFFFF), pct = p < 0 ? 0 : (p & 0xFF);
+            String live = ph == 2 ? " · מפענח מילים (" + tok + ")" : ph == 1 ? " · מעבד שמע" : "";
+            if (pct > 0 && pct < 100) live += " · " + pct + "%";
+            if (r > 0) eta = live + " · נותרו ~" + fmt(r);
+            else eta = live + " · לוקח יותר מהצפוי" + (j.hqModel ? " (מודל איטי)" : "");
         } else if ("ממתין למנוע".equals(j.state)) eta = " · ממתין לסיום התמלול הקודם";
         return "● " + j.name + " — " + j.state + a + " · עבר " + fmt(j.elapsed()) + eta;
     }
@@ -220,6 +232,7 @@ public class MainActivity extends Activity {
         else if (running) status.setText("ממשיך גם כשהאפליקציה סגורה — התוצאה תגיע בהתראה" + (prefs.getBoolean("autoCopy", true) ? " ותועתק ללוח" : ""));
     }
     void ui(String s) { runOnUiThread(() -> status.setText(s)); }
+    void downloadFast() { if (DownloadService.running) return; prefs.edit().putBoolean("hq", false).apply(); downloadModel(); }
     void downloadModel() {
         if (DownloadService.running) { DownloadService.cancel(this); return; } // button doubles as cancel while downloading
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0)

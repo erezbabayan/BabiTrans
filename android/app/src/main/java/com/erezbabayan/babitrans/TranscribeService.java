@@ -12,7 +12,7 @@ public class TranscribeService extends Service {
     static final String CH_RUN = "running", CH_DONE = "done"; static final int FG_ID = 100;
     static final class Job {
         final int id; final Uri uri; final String name; final boolean cloud;
-        volatile String state = "ממתין בתור"; volatile int audioSecs = -1; volatile long startMs, endMs, etaMs, sttMs; volatile boolean done, failed, cancelled, inNative; volatile String text = ""; volatile Thread worker;
+        volatile String state = "ממתין בתור"; volatile int audioSecs = -1; volatile long startMs, endMs, etaMs, sttMs; volatile boolean done, failed, cancelled, inNative, hqModel; volatile int prog = -1; volatile String text = ""; volatile Thread worker;
         Job(int id, Uri u, String n, boolean c) { this.id = id; uri = u; name = n; cloud = c; }
         /** Seconds left (estimated), or -1 if unknown. */
         long remaining() { if (done || etaMs <= 0) return -1; return Math.max(0, (etaMs - System.currentTimeMillis() + 999) / 1000); }
@@ -125,6 +125,7 @@ public class TranscribeService extends Service {
     void tick() {
         h.removeCallbacksAndMessages(null);
         if (!anyRunning()) return;
+        for (Job j : JOBS) if (j.inNative && !j.done) { int p = Whisper.progress(j.id); if (p >= 0) j.prog = p; }
         getSystemService(NotificationManager.class).notify(FG_ID, fgNote()); changed();
         h.postDelayed(this::tick, 1000);
     }
@@ -145,14 +146,16 @@ public class TranscribeService extends Service {
                 if (j.cancelled) throw new IOException("בוטל");
                 int secs = Math.max(1, pcm.length / 16000); j.audioSecs = secs;
                 String mp = MainActivity.modelFile(this).getAbsolutePath();
-                if (wctx == 0 || !mp.equals(wpath)) { j.state = "טוען מודל"; changed(); ensureCtx(mp); }
+                j.hqModel = mp.contains("q5");
+                if (wctx == 0 || !mp.equals(wpath)) { j.state = "טוען מודל…"; changed(); long l0 = System.currentTimeMillis(); ensureCtx(mp);
+                    android.util.Log.i("BabiTrans", "model load " + (System.currentTimeMillis() - l0) + "ms " + mp); }
                 if (j.cancelled) throw new IOException("בוטל");
                 String key = "rtf_" + (mp.contains("q5") ? "hq" : "fast");
                 float rtf = prefs.getFloat(key, mp.contains("q5") ? 0.35f : 0.15f); // processing sec per audio sec, learned
                 int eff = secs < 28 ? secs : (int) Math.ceil(secs / 30.0) * 30; // >28s runs full 30s windows
                 long est = (long) (1000 * (1.5 + eff * rtf));
-                // watchdog: 4x estimate, min 60s, so a hung note fails fast instead of spinning for minutes
-                int timeout = (int) Math.max(60, est * 4 / 1000);
+                // watchdog: 4x estimate; floor 30s for short notes (<=15s audio), 60s otherwise — a hung note fails fast
+                int timeout = (int) Math.max(secs <= 15 ? 30 : 60, est * 4 / 1000);
                 j.state = "ממתין למנוע"; changed();
                 long t1;
                 STT.lockInterruptibly();
