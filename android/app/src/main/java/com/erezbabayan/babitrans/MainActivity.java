@@ -39,10 +39,13 @@ public class MainActivity extends Activity {
     }
 
     TextView label(String t, int size, int color) { TextView v = new TextView(this); v.setText(t); v.setTextSize(size); v.setTextColor(color); v.setTextDirection(View.TEXT_DIRECTION_RTL); return v; }
+    /** Convert density-independent pixels to px (Material min touch target is 48dp). */
+    int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
     Button btn(String t, int bg, int fg, View.OnClickListener l) {
         Button x = new Button(this); x.setText(t); x.setTextColor(fg); x.setAllCaps(false); x.setTextSize(17);
-        GradientDrawable d = new GradientDrawable(); d.setColor(bg); d.setCornerRadius(40); x.setBackground(d); x.setOnClickListener(l);
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2); p.topMargin = 24; x.setLayoutParams(p); return x;
+        GradientDrawable d = new GradientDrawable(); d.setColor(bg); d.setCornerRadius(dp(12)); x.setBackground(d); x.setOnClickListener(l);
+        x.setMinHeight(dp(48)); x.setMinimumHeight(dp(48));
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2); p.topMargin = dp(8); x.setLayoutParams(p); return x;
     }
     void buildUi() {
         ScrollView sv = new ScrollView(this); sv.setBackgroundColor(NAVY);
@@ -114,7 +117,9 @@ public class MainActivity extends Activity {
         StringBuilder sb = new StringBuilder(); for (byte x : md.digest()) sb.append(String.format("%02x", x)); return sb.toString();
     }
     TextView link(String t, Runnable r) {
-        TextView v = label(t + "   ", 14, 0xFF5B4FC9); v.setPaintFlags(v.getPaintFlags() | Paint.UNDERLINE_TEXT_FLAG); v.setOnClickListener(x -> r.run()); return v;
+        TextView v = label(t + "   ", 14, 0xFF5B4FC9); v.setPaintFlags(v.getPaintFlags() | Paint.UNDERLINE_TEXT_FLAG); v.setOnClickListener(x -> r.run());
+        v.setMinHeight(dp(48)); v.setMinimumHeight(dp(48)); v.setGravity(Gravity.CENTER_VERTICAL);
+        v.setPadding(dp(8), dp(12), dp(8), dp(12)); return v;
     }
     void openUrl(String url) {
         try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); } catch (Exception e) { Toast.makeText(this, "לא ניתן לפתוח את הקישור", Toast.LENGTH_SHORT).show(); }
@@ -227,10 +232,17 @@ public class MainActivity extends Activity {
     void renderJobs() {
         jobsBox.removeAllViews(); boolean running = false;
         for (TranscribeService.Job j : TranscribeService.JOBS) {
-            LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); row.setGravity(Gravity.CENTER_VERTICAL); row.setPadding(0,8,0,8);
+            LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(4), 0, dp(4)); row.setMinimumHeight(dp(48));
             TextView t = label(jobLine(j), 14, j.done ? (j.failed ? 0xFFFF8A80 : CREAM) : YELLOW);
             row.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
-            if (!j.done) { running = true; TextView x = label("  ביטול", 14, 0xFFFF8A80); x.setOnClickListener(v -> TranscribeService.cancel(j.id)); row.addView(x); }
+            if (!j.done) {
+                running = true;
+                TextView x = label("ביטול", 14, 0xFFFF8A80);
+                x.setMinHeight(dp(48)); x.setMinimumHeight(dp(48)); x.setMinWidth(dp(48)); x.setMinimumWidth(dp(48));
+                x.setGravity(Gravity.CENTER); x.setPadding(dp(12), dp(12), dp(12), dp(12));
+                x.setOnClickListener(v -> TranscribeService.cancel(j.id)); row.addView(x);
+            }
             else if (!j.failed) { row.setOnClickListener(v -> { shownJob = j.id; transcript.setText(j.text); }); }
             jobsBox.addView(row);
             if (j.done && !j.failed && j.id > shownJob) { shownJob = j.id; transcript.setText(j.text); }
