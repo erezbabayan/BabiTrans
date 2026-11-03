@@ -42,3 +42,5 @@ h1{margin:0 0 6px;font-size:28px;font-weight:800}
 .row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:12px}
 label{display:block;text-align:start;margin:12px 0;color:var(--mut);font-size:14px}
 input{display:block;width:100%;margin-top:6px;padding:10px 12px;border-radius:12px;border:1px solid rgba(42,27,122,.2);font:inherit;background:#fff}
+.transcript.error{color:#ffb4b4}
+.noconn{margin-top:8px;text-align:center}
