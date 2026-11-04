@@ -1,17 +1,39 @@
 name: build-apk
 on:
   push: { branches: [main] }
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
 permissions: { contents: read }
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
+  checks:
+    name: server + pwa syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - uses: actions/setup-node@v7
+        with: { node-version: '20' }
+      - name: python syntax
+        run: python -m py_compile server/app.py
+      - name: pwa js syntax
+        run: node --check pwa/app.js && node --check pwa/sw.js
   build:
+    name: android assembleDebug (unsigned)
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: android } }
     steps:
       - uses: actions/checkout@v7
+        with: { persist-credentials: false }
       - uses: actions/setup-java@v6
-        with: { distribution: temurin, java-version: '17' }
+        with: { distribution: temurin, java-version: '17', cache: gradle }
       - uses: android-actions/setup-android@v4
       - run: chmod +x gradlew && ./gradlew assembleDebug --no-daemon && cp app/build/outputs/apk/debug/app-debug.apk ../BabiTrans-debug.apk
-      - uses: actions/upload-artifact@v7
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
         with: { name: BabiTrans-debug-apk, path: BabiTrans-debug.apk }
